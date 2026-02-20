@@ -28,7 +28,7 @@
       "name": "Sync Endpoint",
       "description": "URL to POST progress to (for example, http://localhost:3000/api/sync/progress).",
       "type": "string",
-      "default": "http://localhost:3000/api/sync/progress"
+      "default": "https://dash.motioncore.xyz/api/sync/progress"
     },
     "api-key": {
       "name": "API Key",
