@@ -4,6 +4,8 @@
 
 Small Geode mod that syncs your Geometry Dash level progress to DashDice.
 
+Repo: https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod
+
 ## What It Does
 - Sends your `normal%`, `practice%`, and `attempts` after runs.
 - Keeps a local queue and retries automatically if your server is offline.

@@ -6,7 +6,7 @@
   "developers": [
     "aaron"
   ],
-  "description": "Syncs Geometry Dash normal/practice progress to a web server endpoint.",
+  "description": "Keeps your Geometry Dash level progress synced with DashDice automatically. Repo: https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod",
   "repository": "https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod",
   "gd": {
     "win": "2.2081",
