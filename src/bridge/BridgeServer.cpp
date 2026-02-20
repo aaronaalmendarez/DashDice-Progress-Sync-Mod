@@ -334,7 +334,7 @@ public:
 
         std::string configuredOrigins = Mod::get()->getSettingValue<std::string>("bridge-allowed-origins");
         if (configuredOrigins.empty()) {
-            configuredOrigins = "https://dash.motioncore.xyz,http://localhost:3000,http://localhost:3005";
+            configuredOrigins = "https://dash.motioncore.xyz";
         }
 
         bool needsRestart = false;
@@ -943,9 +943,7 @@ private:
 #endif
 
     int m_port { kDefaultPort };
-    std::string m_allowedOriginsRaw {
-        "https://dash.motioncore.xyz,http://localhost:3000,http://localhost:3005"
-    };
+    std::string m_allowedOriginsRaw { "https://dash.motioncore.xyz" };
     std::unordered_set<std::string> m_allowedOrigins;
     std::unordered_map<std::string, int64_t> m_seenNonces;
     std::string m_sessionToken;

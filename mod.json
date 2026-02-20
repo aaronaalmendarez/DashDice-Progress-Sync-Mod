@@ -26,7 +26,7 @@
     },
     "server-url": {
       "name": "Sync Endpoint",
-      "description": "URL to POST progress to (for example, http://localhost:3000/api/sync/progress).",
+      "description": "URL to POST progress to (for example, https://dash.motioncore.xyz/api/sync/progress).",
       "type": "string",
       "default": "https://dash.motioncore.xyz/api/sync/progress"
     },
@@ -61,7 +61,7 @@
       "name": "Open-Level Allowed Origins",
       "description": "Comma-separated origins allowed to call the local bridge.",
       "type": "string",
-      "default": "https://dash.motioncore.xyz,http://localhost:3000,http://localhost:3005"
+      "default": "https://dash.motioncore.xyz"
     },
     "debug-logs": {
       "name": "Debug Logs",
