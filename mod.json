@@ -6,8 +6,8 @@
   "developers": [
     "aaron"
   ],
-  "description": "Automatically syncs your Geometry Dash level progress to DashDice.",
-  "repository": "https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod",
+  "description": "Syncs Geometry Dash normal/practice progress to a web server endpoint.",
+  "repository": "https://example.com/dashdice",
   "gd": {
     "win": "2.2081",
     "mac": "2.2081",
@@ -42,6 +42,26 @@
       "type": "int",
       "default": 12,
       "min": 3
+    },
+    "enable-open-level-bridge": {
+      "name": "Enable Open-Level Bridge",
+      "description": "Allows DashDice website to open a level page in Geometry Dash.",
+      "type": "bool",
+      "default": true
+    },
+    "bridge-port": {
+      "name": "Open-Level Bridge Port",
+      "description": "Localhost port used by website -> game open-level requests.",
+      "type": "int",
+      "default": 47653,
+      "min": 1024,
+      "max": 65535
+    },
+    "bridge-allowed-origins": {
+      "name": "Open-Level Allowed Origins",
+      "description": "Comma-separated origins allowed to call the local bridge.",
+      "type": "string",
+      "default": "https://dash.motioncore.xyz,http://localhost:3000,http://localhost:3005"
     },
     "debug-logs": {
       "name": "Debug Logs",

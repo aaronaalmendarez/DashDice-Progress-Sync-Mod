@@ -3,6 +3,7 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 
+#include "bridge/BridgeServer.hpp"
 #include "sync/SyncManager.hpp"
 
 using namespace geode::prelude;
@@ -28,6 +29,7 @@ class $modify(ProgressSyncMenuLayer, MenuLayer) {
         if (!MenuLayer::init()) {
             return false;
         }
+        dashdice::BridgeServer::get().onMenuReady();
         dashdice::SyncManager::get().onMenuReady();
         return true;
     }

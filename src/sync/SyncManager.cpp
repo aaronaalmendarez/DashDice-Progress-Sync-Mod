@@ -247,30 +247,49 @@ arc::Future<Result<>> SyncManager::pingAsync() {
     const std::string pingUrl = pingUrlFromProgressUrl(this->serverUrl());
     const std::string key = this->apiKey();
 
-    const web::WebResponse response = co_await web::WebRequest()
+    const web::WebResponse pingResponse = co_await web::WebRequest()
                                           .timeout(std::chrono::seconds(this->timeoutSeconds()))
                                           .header("Authorization", fmt::format("Bearer {}", key))
                                           .header("Content-Type", "application/json")
                                           .bodyJSON(payload)
                                           .post(pingUrl);
 
-    if (!response.ok()) {
-        std::string body;
-        if (auto bodyRes = response.string(); bodyRes.isOk()) {
-            body = bodyRes.unwrap();
+    if (!pingResponse.ok()) {
+        std::string pingBody;
+        if (auto bodyRes = pingResponse.string(); bodyRes.isOk()) {
+            pingBody = bodyRes.unwrap();
+        }
+
+        // Some deployments can have /ping out-of-sync while /progress auth is valid.
+        // Verify against the actual progress endpoint before reporting invalid key.
+        const web::WebResponse authCheck = co_await web::WebRequest()
+                                               .timeout(std::chrono::seconds(this->timeoutSeconds()))
+                                               .header("Authorization", fmt::format("Bearer {}", key))
+                                               .get(this->serverUrl());
+        if (authCheck.ok()) {
+            if (this->isDebugEnabled()) {
+                log::debug(
+                    "[ProgressSync] Ping endpoint failed (HTTP {}), but progress auth-check succeeded",
+                    pingResponse.code()
+                );
+            }
+            co_return Ok();
+        }
+
+        std::string checkBody;
+        if (auto bodyRes = authCheck.string(); bodyRes.isOk()) {
+            checkBody = bodyRes.unwrap();
         }
 
         co_return Err(fmt::format(
-            "HTTP {} while pinging sync{}{}",
-            response.code(),
-            body.empty() ? "" : ": ",
-            body
+            "HTTP {} while pinging sync{}{}; auth-check failed with HTTP {}{}{}",
+            pingResponse.code(),
+            pingBody.empty() ? "" : ": ",
+            pingBody,
+            authCheck.code(),
+            checkBody.empty() ? "" : ": ",
+            checkBody
         ));
-    }
-
-    Result<matjson::Value> json = response.json();
-    if (GEODE_UNWRAP_IF_ERR(err, json)) {
-        co_return Err(fmt::format("Ping returned non-JSON response: {}", err));
     }
 
     co_return Ok();
