@@ -1,0 +1,8 @@
+build/
+*.obj
+*.pdb
+*.lib
+*.ilk
+*.exp
+*.log
+.DS_Store
