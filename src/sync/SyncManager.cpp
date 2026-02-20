@@ -46,6 +46,16 @@ matjson::Value popFront(const matjson::Value& arr) {
     }
     return out;
 }
+
+std::string pingUrlFromProgressUrl(const std::string& progressUrl) {
+    constexpr const char* suffix = "/progress";
+    const auto suffixLen = std::char_traits<char>::length(suffix);
+    if (progressUrl.size() >= suffixLen &&
+        progressUrl.compare(progressUrl.size() - suffixLen, suffixLen, suffix) == 0) {
+        return progressUrl.substr(0, progressUrl.size() - suffixLen) + "/ping";
+    }
+    return progressUrl;
+}
 } // namespace
 
 namespace dashdice {
@@ -145,6 +155,7 @@ void SyncManager::enqueueFromLevel(GJGameLevel* level, bool levelCompleted) {
 
 void SyncManager::onMenuReady() {
     this->maybeWarnNoAccount();
+    this->runPing();
     this->runFlush();
 }
 
@@ -180,6 +191,89 @@ void SyncManager::runFlush() {
             log::debug("[ProgressSync] Queue flush completed");
         }
     });
+}
+
+void SyncManager::runPing() {
+    if (!this->isEnabled()) {
+        return;
+    }
+
+    const std::string url = this->serverUrl();
+    const std::string key = this->apiKey();
+    if (url.empty() || key.empty()) {
+        return;
+    }
+
+    if (m_pinging.exchange(true)) {
+        return;
+    }
+
+    async::spawn(this->pingAsync(), [this](Result<> result) {
+        m_pinging.store(false);
+        if (GEODE_UNWRAP_IF_ERR(err, result)) {
+            if (this->isDebugEnabled()) {
+                log::warn("[ProgressSync] Ping failed: {}", err);
+            }
+            return;
+        }
+
+        if (this->isDebugEnabled()) {
+            log::debug("[ProgressSync] Connection ping completed");
+        }
+    });
+}
+
+arc::Future<Result<>> SyncManager::pingAsync() {
+    auto* accountMgr = GJAccountManager::sharedState();
+    auto* gameMgr = GameManager::sharedState();
+    const int gdAccountId = accountMgr ? accountMgr->m_accountID : 0;
+    const bool gdHasAccount = gdAccountId > 0;
+    const std::string gdUsername =
+        accountMgr && !accountMgr->m_username.empty() ? accountMgr->m_username : "";
+    const std::string gdPlayerName =
+        gameMgr && !gameMgr->m_playerName.empty() ? gameMgr->m_playerName : "";
+
+    matjson::Value payload = matjson::makeObject({
+        { "clientTs", fmt::format("{}", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count()) },
+        { "source", "menuPing" },
+        { "gdHasAccount", gdHasAccount },
+        { "gdAccountId", gdAccountId },
+        { "gdUsername", gdUsername },
+        { "gdPlayerName", gdPlayerName },
+    });
+
+    const std::string pingUrl = pingUrlFromProgressUrl(this->serverUrl());
+    const std::string key = this->apiKey();
+
+    const web::WebResponse response = co_await web::WebRequest()
+                                          .timeout(std::chrono::seconds(this->timeoutSeconds()))
+                                          .header("Authorization", fmt::format("Bearer {}", key))
+                                          .header("Content-Type", "application/json")
+                                          .bodyJSON(payload)
+                                          .post(pingUrl);
+
+    if (!response.ok()) {
+        std::string body;
+        if (auto bodyRes = response.string(); bodyRes.isOk()) {
+            body = bodyRes.unwrap();
+        }
+
+        co_return Err(fmt::format(
+            "HTTP {} while pinging sync{}{}",
+            response.code(),
+            body.empty() ? "" : ": ",
+            body
+        ));
+    }
+
+    Result<matjson::Value> json = response.json();
+    if (GEODE_UNWRAP_IF_ERR(err, json)) {
+        co_return Err(fmt::format("Ping returned non-JSON response: {}", err));
+    }
+
+    co_return Ok();
 }
 
 arc::Future<Result<>> SyncManager::flushAsync() {

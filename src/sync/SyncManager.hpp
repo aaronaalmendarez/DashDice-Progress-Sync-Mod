@@ -31,11 +31,14 @@ private:
     void saveQueue(const matjson::Value& queue) const;
     void appendQueue(const matjson::Value& payload);
 
+    void runPing();
     void runFlush();
+    arc::Future<geode::Result<>> pingAsync();
     arc::Future<geode::Result<>> flushAsync();
     arc::Future<geode::Result<matjson::Value>> postPayload(const matjson::Value& payload);
     void maybeWarnNoAccount();
 
+    std::atomic<bool> m_pinging { false };
     std::atomic<bool> m_flushing { false };
     bool m_warnedNoAccount = false;
     std::unordered_map<int, std::tuple<int, int, int>> m_lastSeenByLevel;
