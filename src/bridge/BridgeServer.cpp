@@ -237,7 +237,7 @@ bool isUsableLevelName(GJGameLevel* level, int levelId) {
 }
 
 bool hasOpenReadyMetadata(GJGameLevel* level, int levelId) {
-    return isUsableLevelName(level, levelId) && hasCreatorMetadata(level);
+    return isUsableLevelName(level, levelId);
 }
 
 std::string resolveCreatorNameFromCaches(GameLevelManager* manager, GJGameLevel* level) {
@@ -456,7 +456,7 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
     }
 
     std::thread([levelId, requireCreatorMetadata]() {
-        const int maxAttempts = requireCreatorMetadata ? 25 : 60;
+        const int maxAttempts = requireCreatorMetadata ? 80 : 60;
         for (int i = 0; i < maxAttempts; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
@@ -479,7 +479,7 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
                 if (requireCreatorMetadata && !hasOpenReadyMetadata(level, levelId)) {
                     if (bridgeDebugEnabled() && (attempt == 0 || attempt % 10 == 0)) {
                         log::debug(
-                            "[DashDiceBridge] Still waiting full metadata for level {} at attempt {} from {}: {}",
+                            "[DashDiceBridge] Still waiting open-ready metadata for level {} at attempt {} from {}: {}",
                             levelId,
                             attempt,
                             source ? source : "unknown",
