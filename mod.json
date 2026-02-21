@@ -7,7 +7,7 @@
     "aaron"
   ],
   "description": "Syncs Geometry Dash normal/practice progress to a web server endpoint.",
-  "repository": "https://example.com/dashdice",
+  "repository": "https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod",
   "gd": {
     "win": "2.2081",
     "mac": "2.2081",
