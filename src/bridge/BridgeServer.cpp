@@ -149,8 +149,7 @@ void endPendingOpen(int levelId) {
 bool hasCreatorMetadata(GJGameLevel* level) {
     if (!level) return false;
     auto creator = toLower(trim(level->m_creatorName));
-    return !creator.empty() && creator != "-" && creator != "unknown" && creator != "na" &&
-           creator != "usernamedefault";
+    return !creator.empty() && creator != "-" && creator != "unknown" && creator != "na";
 }
 
 bool bridgeDebugEnabled() {
@@ -161,8 +160,9 @@ bool bridgeDebugEnabled() {
 std::string describeLevelState(char const* label, GJGameLevel* level) {
     if (!level) return fmt::format("{}=null", label);
     return fmt::format(
-        "{}{{name='{}', creator='{}', user_id={}, account_id={}, has_name={}, has_creator={}}}",
+        "{}{{id={}, name='{}', creator='{}', user_id={}, account_id={}, has_name={}, has_creator={}}}",
         label,
+        level->m_levelID.value(),
         trim(level->m_levelName),
         trim(level->m_creatorName),
         level->m_userID.value(),
@@ -217,8 +217,7 @@ int resolveAccountId(GameLevelManager* manager, GJGameLevel* level) {
 
 bool isUsableName(std::string const& name) {
     auto normalized = toLower(trim(name));
-    return !normalized.empty() && normalized != "-" && normalized != "unknown" && normalized != "na" &&
-           normalized != "usernamedefault";
+    return !normalized.empty() && normalized != "-" && normalized != "unknown" && normalized != "na";
 }
 
 bool isUsableLevelName(GJGameLevel* level, int levelId) {
@@ -238,6 +237,11 @@ bool isUsableLevelName(GJGameLevel* level, int levelId) {
 
 bool hasOpenReadyMetadata(GJGameLevel* level, int levelId) {
     return isUsableLevelName(level, levelId);
+}
+
+bool levelMatchesRequestedId(GJGameLevel* level, int levelId) {
+    if (!level) return false;
+    return level->m_levelID.value() == levelId;
 }
 
 std::string resolveCreatorNameFromCaches(GameLevelManager* manager, GJGameLevel* level) {
@@ -335,6 +339,27 @@ GJGameLevel* getBestLevel(GameLevelManager* manager, int levelId, char const** o
         );
     }
 
+    if (saved && !levelMatchesRequestedId(saved, levelId)) {
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Ignoring saved candidate with mismatched id for {}: {}",
+                levelId,
+                describeLevelState("saved", saved)
+            );
+        }
+        saved = nullptr;
+    }
+    if (main && !levelMatchesRequestedId(main, levelId)) {
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Ignoring main candidate with mismatched id for {}: {}",
+                levelId,
+                describeLevelState("main", main)
+            );
+        }
+        main = nullptr;
+    }
+
     if (saved) hydrateCreatorName(manager, saved, main);
     if (main) hydrateCreatorName(manager, main, saved);
 
@@ -408,6 +433,21 @@ bool tryOpenUncachedLevelInfoScene(int levelId) {
     return true;
 }
 
+bool replaceLevelInfoScene(GJGameLevel* level, int levelId) {
+    if (!level) return false;
+    auto* scene = LevelInfoLayer::scene(level, false);
+    if (!scene) return false;
+
+    auto* director = cocos2d::CCDirector::sharedDirector();
+    if (!director) return false;
+
+    director->replaceScene(cocos2d::CCTransitionFade::create(0.12f, scene));
+    if (bridgeDebugEnabled()) {
+        log::debug("[DashDiceBridge] Replaced placeholder scene with resolved level {}", levelId);
+    }
+    return true;
+}
+
 void requestCreatorMetadata(GameLevelManager* manager, int levelId, GJGameLevel* level) {
     if (!manager) return;
 
@@ -450,19 +490,19 @@ void requestCreatorMetadata(GameLevelManager* manager, int levelId, GJGameLevel*
     }
 }
 
-void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
+void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata, bool replaceSceneOnResolve) {
     if (!beginPendingOpen(levelId)) {
         return;
     }
 
-    std::thread([levelId, requireCreatorMetadata]() {
+    std::thread([levelId, requireCreatorMetadata, replaceSceneOnResolve]() {
         const int maxAttempts = requireCreatorMetadata ? 80 : 60;
         for (int i = 0; i < maxAttempts; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
             std::promise<bool> openedPromise;
             auto openedFuture = openedPromise.get_future();
-            geode::queueInMainThread([levelId, requireCreatorMetadata, attempt = i, p = std::move(openedPromise)]() mutable {
+            geode::queueInMainThread([levelId, requireCreatorMetadata, replaceSceneOnResolve, attempt = i, p = std::move(openedPromise)]() mutable {
                 auto* manager = GameLevelManager::sharedState();
                 if (!manager || !manager->hasDownloadedLevel(levelId)) {
                     p.set_value(false);
@@ -498,7 +538,13 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
                         describeLevelState("level", level)
                     );
                 }
-                manager->gotoLevelPage(level);
+                const bool replaced = replaceSceneOnResolve && replaceLevelInfoScene(level, levelId);
+                if (!replaced) {
+                    if (bridgeDebugEnabled() && replaceSceneOnResolve) {
+                        log::debug("[DashDiceBridge] Scene replace failed for level {}, falling back to gotoLevelPage", levelId);
+                    }
+                    manager->gotoLevelPage(level);
+                }
                 p.set_value(true);
             });
 
@@ -513,23 +559,36 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
             }
         }
 
-        geode::queueInMainThread([levelId, requireCreatorMetadata]() {
+        geode::queueInMainThread([levelId, requireCreatorMetadata, replaceSceneOnResolve]() {
             auto* manager = GameLevelManager::sharedState();
             if (manager && manager->hasDownloadedLevel(levelId)) {
                 char const* source = nullptr;
                 if (auto* level = getBestLevel(manager, levelId, &source)) {
-                    manager->gotoLevelPage(level);
-                    if (requireCreatorMetadata) {
-                        log::warn(
-                            "[DashDiceBridge] Opened level {} after metadata wait timeout from {}: {}",
-                            levelId,
-                            source ? source : "unknown",
-                            describeLevelState("level", level)
-                        );
-                    } else {
-                        log::warn("[DashDiceBridge] Opened level {} after download wait timeout", levelId);
+                    if (hasOpenReadyMetadata(level, levelId)) {
+                        const bool replaced = replaceSceneOnResolve && replaceLevelInfoScene(level, levelId);
+                        if (!replaced) {
+                            if (bridgeDebugEnabled() && replaceSceneOnResolve) {
+                                log::debug("[DashDiceBridge] Scene replace failed during timeout fallback for level {}, using gotoLevelPage", levelId);
+                            }
+                            manager->gotoLevelPage(level);
+                        }
+                        if (requireCreatorMetadata) {
+                            log::warn(
+                                "[DashDiceBridge] Opened level {} after metadata wait timeout from {}: {}",
+                                levelId,
+                                source ? source : "unknown",
+                                describeLevelState("level", level)
+                            );
+                        } else {
+                            log::warn("[DashDiceBridge] Opened level {} after download wait timeout", levelId);
+                        }
+                        return;
                     }
-                    return;
+                    log::warn(
+                        "[DashDiceBridge] Timeout reached for level {} but metadata still placeholder-like; skipping fallback open: {}",
+                        levelId,
+                        describeLevelState("level", level)
+                    );
                 }
             }
 
@@ -556,9 +615,14 @@ void queueOpenLevel(int levelId) {
         char const* cachedSource = nullptr;
         auto* cachedLevel = wasDownloaded ? getBestLevel(manager, levelId, &cachedSource) : nullptr;
 
-        // Fast path: only immediate-open when cached level already has creator metadata.
+        // Fast path: only immediate-open when cached level metadata is already usable.
         if (cachedLevel && hasOpenReadyMetadata(cachedLevel, levelId)) {
-            manager->gotoLevelPage(cachedLevel);
+            if (!replaceLevelInfoScene(cachedLevel, levelId)) {
+                if (Mod::get()->getSettingValue<bool>("debug-logs")) {
+                    log::debug("[DashDiceBridge] Scene replace failed for cached level {}, using gotoLevelPage", levelId);
+                }
+                manager->gotoLevelPage(cachedLevel);
+            }
             if (Mod::get()->getSettingValue<bool>("debug-logs")) {
                 log::debug(
                     "[DashDiceBridge] Opened level {} immediately from cache (source={}): {}",
@@ -593,7 +657,8 @@ void queueOpenLevel(int levelId) {
             }
         }
 
-        scheduleOpenWhenDownloaded(levelId, true);
+        // Always prefer scene replacement for bridge opens to avoid placeholder entries in back-stack history.
+        scheduleOpenWhenDownloaded(levelId, true, true);
     });
 }
 } // namespace
