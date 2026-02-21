@@ -28,6 +28,7 @@
       "name": "Sync Endpoint",
       "description": "URL to POST progress to (for example, https://dash.motioncore.xyz/api/sync/progress).",
       "type": "string",
+      "filter": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=% ",
       "default": "https://dash.motioncore.xyz/api/sync/progress"
     },
     "api-key": {
@@ -61,6 +62,7 @@
       "name": "Open-Level Allowed Origins",
       "description": "Comma-separated origins allowed to call the local bridge.",
       "type": "string",
+      "filter": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=% ",
       "default": "https://dash.motioncore.xyz"
     },
     "debug-logs": {

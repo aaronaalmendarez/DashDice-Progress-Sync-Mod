@@ -133,6 +133,78 @@ bool isLocalOrigin(std::string const& origin) {
            startsWith(origin, "https://localhost:") || startsWith(origin, "https://127.0.0.1:");
 }
 
+constexpr bool kDefaultBridgeEnabled = true;
+constexpr bool kDefaultDebugLogs = true;
+constexpr int kDefaultBridgePort = 47653;
+constexpr char const* kDefaultAllowedOrigins = "https://dash.motioncore.xyz";
+
+bool loadMirroredBridgeBool(char const* settingKey, char const* mirrorKey, bool defaultValue) {
+    auto* mod = Mod::get();
+    if (!mod) return defaultValue;
+
+    bool current = mod->getSettingValue<bool>(settingKey);
+    const bool hasMirror = mod->hasSavedValue(mirrorKey);
+    const bool mirrored = mod->getSavedValue<bool>(mirrorKey, defaultValue);
+
+    if (hasMirror && current == defaultValue && mirrored != current) {
+        mod->setSettingValue(settingKey, mirrored);
+        current = mirrored;
+    }
+
+    if (!hasMirror || mirrored != current) {
+        mod->setSavedValue(mirrorKey, current);
+    }
+
+    return current;
+}
+
+int loadMirroredBridgePort(char const* settingKey, char const* mirrorKey, int defaultValue) {
+    auto* mod = Mod::get();
+    if (!mod) return defaultValue;
+
+    int current = mod->getSettingValue<int>(settingKey);
+    if (current < 1024 || current > 65535) current = defaultValue;
+
+    const bool hasMirror = mod->hasSavedValue(mirrorKey);
+    int mirrored = mod->getSavedValue<int>(mirrorKey, defaultValue);
+    if (mirrored < 1024 || mirrored > 65535) mirrored = defaultValue;
+
+    if (hasMirror && current == defaultValue && mirrored != current) {
+        mod->setSettingValue(settingKey, mirrored);
+        current = mirrored;
+    }
+
+    if (!hasMirror || mirrored != current) {
+        mod->setSavedValue(mirrorKey, current);
+    }
+
+    return current;
+}
+
+std::string loadMirroredBridgeOrigins(char const* settingKey, char const* mirrorKey, char const* defaultValue) {
+    auto* mod = Mod::get();
+    if (!mod) return defaultValue;
+
+    std::string current = mod->getSettingValue<std::string>(settingKey);
+    const bool hasMirror = mod->hasSavedValue(mirrorKey);
+    const std::string mirrored = mod->getSavedValue<std::string>(mirrorKey, "");
+    const bool currentIsDefaultLike = current.empty() || current == defaultValue;
+
+    if (hasMirror && !mirrored.empty() && currentIsDefaultLike && mirrored != current) {
+        mod->setSettingValue(settingKey, mirrored);
+        current = mirrored;
+    }
+
+    if (!current.empty() && (!hasMirror || mirrored != current)) {
+        mod->setSavedValue(mirrorKey, current);
+    }
+
+    if (current.empty()) {
+        return defaultValue;
+    }
+    return current;
+}
+
 std::mutex g_pendingOpenMutex;
 std::unordered_set<int> g_pendingOpenLevels;
 
@@ -693,15 +765,16 @@ public:
             return;
         }
 
-        int configuredPort = Mod::get()->getSettingValue<int>("bridge-port");
-        if (configuredPort < 1024 || configuredPort > 65535) {
-            configuredPort = kDefaultPort;
-        }
-
-        std::string configuredOrigins = Mod::get()->getSettingValue<std::string>("bridge-allowed-origins");
-        if (configuredOrigins.empty()) {
-            configuredOrigins = "https://dash.motioncore.xyz";
-        }
+        int configuredPort = loadMirroredBridgePort(
+            "bridge-port",
+            "persist-setting-bridge-port",
+            kDefaultBridgePort
+        );
+        std::string configuredOrigins = loadMirroredBridgeOrigins(
+            "bridge-allowed-origins",
+            "persist-setting-bridge-allowed-origins",
+            kDefaultAllowedOrigins
+        );
 
         bool needsRestart = false;
         {
@@ -778,11 +851,15 @@ public:
 
 private:
     bool isEnabled() const {
-        return Mod::get()->getSettingValue<bool>("enable-open-level-bridge");
+        return loadMirroredBridgeBool(
+            "enable-open-level-bridge",
+            "persist-setting-enable-open-level-bridge",
+            kDefaultBridgeEnabled
+        );
     }
 
     bool isDebugEnabled() const {
-        return Mod::get()->getSettingValue<bool>("debug-logs");
+        return loadMirroredBridgeBool("debug-logs", "persist-setting-debug-logs", kDefaultDebugLogs);
     }
 
     bool isOriginAllowed(std::string const& origin) const {

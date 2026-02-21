@@ -10,6 +10,7 @@
 #include <Geode/Result.hpp>
 #include <Geode/binding/GJAccountManager.hpp>
 #include <Geode/binding/GameManager.hpp>
+#include <Geode/binding/GameLevelManager.hpp>
 #include <Geode/loader/Log.hpp>
 #include <Geode/loader/Mod.hpp>
 #include <Geode/ui/Popup.hpp>
@@ -19,6 +20,78 @@
 using namespace geode::prelude;
 
 namespace {
+constexpr bool kDefaultEnableSync = true;
+constexpr bool kDefaultDebugLogs = true;
+constexpr int kDefaultRequestTimeout = 12;
+constexpr char const* kDefaultSyncEndpoint = "https://dash.motioncore.xyz/api/sync/progress";
+
+bool loadMirroredBool(char const* settingKey, char const* mirrorKey, bool defaultValue) {
+    auto* mod = Mod::get();
+    if (!mod) return defaultValue;
+
+    bool current = mod->getSettingValue<bool>(settingKey);
+    const bool hasMirror = mod->hasSavedValue(mirrorKey);
+    const bool mirrored = mod->getSavedValue<bool>(mirrorKey, defaultValue);
+
+    if (hasMirror && current == defaultValue && mirrored != current) {
+        mod->setSettingValue(settingKey, mirrored);
+        current = mirrored;
+    }
+
+    if (!hasMirror || mirrored != current) {
+        mod->setSavedValue(mirrorKey, current);
+    }
+
+    return current;
+}
+
+int loadMirroredInt(char const* settingKey, char const* mirrorKey, int defaultValue, int minValue) {
+    auto* mod = Mod::get();
+    if (!mod) return defaultValue;
+
+    int current = mod->getSettingValue<int>(settingKey);
+    if (current < minValue) current = defaultValue;
+
+    const bool hasMirror = mod->hasSavedValue(mirrorKey);
+    int mirrored = mod->getSavedValue<int>(mirrorKey, defaultValue);
+    if (mirrored < minValue) mirrored = defaultValue;
+
+    if (hasMirror && current == defaultValue && mirrored != current) {
+        mod->setSettingValue(settingKey, mirrored);
+        current = mirrored;
+    }
+
+    if (!hasMirror || mirrored != current) {
+        mod->setSavedValue(mirrorKey, current);
+    }
+
+    return current;
+}
+
+std::string loadMirroredString(char const* settingKey, char const* mirrorKey, char const* defaultValue) {
+    auto* mod = Mod::get();
+    if (!mod) return defaultValue;
+
+    std::string current = mod->getSettingValue<std::string>(settingKey);
+    const bool hasMirror = mod->hasSavedValue(mirrorKey);
+    const std::string mirrored = mod->getSavedValue<std::string>(mirrorKey, "");
+    const bool currentIsDefaultLike = current.empty() || current == defaultValue;
+
+    if (hasMirror && !mirrored.empty() && currentIsDefaultLike && mirrored != current) {
+        mod->setSettingValue(settingKey, mirrored);
+        current = mirrored;
+    }
+
+    if (!current.empty() && (!hasMirror || mirrored != current)) {
+        mod->setSavedValue(mirrorKey, current);
+    }
+
+    if (current.empty()) {
+        return defaultValue;
+    }
+    return current;
+}
+
 std::string makeEventId() {
     static std::mt19937_64 rng { std::random_device {}() };
     static std::uniform_int_distribution<std::uint64_t> dist;
@@ -28,6 +101,11 @@ std::string makeEventId() {
             .count();
 
     return fmt::format("{}-{:016x}", nowMs, dist(rng));
+}
+
+std::int64_t nowUnixMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 int clampPercent(int value) {
@@ -65,25 +143,23 @@ SyncManager& SyncManager::get() {
 }
 
 bool SyncManager::isEnabled() const {
-    return Mod::get()->getSettingValue<bool>("enable-sync");
+    return loadMirroredBool("enable-sync", "persist-setting-enable-sync", kDefaultEnableSync);
 }
 
 bool SyncManager::isDebugEnabled() const {
-    return Mod::get()->getSettingValue<bool>("debug-logs");
+    return loadMirroredBool("debug-logs", "persist-setting-debug-logs", kDefaultDebugLogs);
 }
 
 std::string SyncManager::serverUrl() const {
-    return Mod::get()->getSettingValue<std::string>("server-url");
+    return loadMirroredString("server-url", "persist-setting-server-url", kDefaultSyncEndpoint);
 }
 
 std::string SyncManager::apiKey() const {
-    return Mod::get()->getSettingValue<std::string>("api-key");
+    return loadMirroredString("api-key", "persist-setting-api-key", "");
 }
 
 int SyncManager::timeoutSeconds() const {
-    int timeout = Mod::get()->getSettingValue<int>("request-timeout");
-    if (timeout < 3) timeout = 3;
-    return timeout;
+    return loadMirroredInt("request-timeout", "persist-setting-request-timeout", kDefaultRequestTimeout, 3);
 }
 
 matjson::Value SyncManager::loadQueue() const {
@@ -104,6 +180,84 @@ void SyncManager::appendQueue(const matjson::Value& payload) {
     this->saveQueue(queue);
 }
 
+SyncManager::ProfileSnapshot SyncManager::collectProfileSnapshot() {
+    ProfileSnapshot snapshot;
+
+    auto* accountMgr = GJAccountManager::sharedState();
+    auto* gameMgr = GameManager::sharedState();
+    auto* levelMgr = GameLevelManager::sharedState();
+
+    snapshot.accountId = accountMgr ? accountMgr->m_accountID : 0;
+    snapshot.hasAccount = snapshot.accountId > 0;
+    snapshot.username = (accountMgr && !accountMgr->m_username.empty()) ? accountMgr->m_username : "";
+
+    if (gameMgr != nullptr) {
+        snapshot.playerName = !gameMgr->m_playerName.empty() ? gameMgr->m_playerName : "";
+        snapshot.userId = static_cast<int>(gameMgr->m_playerUserID.value());
+
+        snapshot.iconCube = gameMgr->getPlayerFrame();
+        snapshot.iconShip = gameMgr->getPlayerShip();
+        snapshot.iconBall = gameMgr->getPlayerBall();
+        snapshot.iconUfo = gameMgr->getPlayerBird();
+        snapshot.iconWave = gameMgr->getPlayerDart();
+        snapshot.iconRobot = gameMgr->getPlayerRobot();
+        snapshot.iconSpider = gameMgr->getPlayerSpider();
+        snapshot.iconSwing = gameMgr->getPlayerSwing();
+        snapshot.iconJetpack = gameMgr->getPlayerJetpack();
+        snapshot.color1 = gameMgr->getPlayerColor();
+        snapshot.color2 = gameMgr->getPlayerColor2();
+        snapshot.glowEnabled = gameMgr->getPlayerGlow() ? 1 : 0;
+    }
+
+    if (levelMgr != nullptr && snapshot.accountId > 0) {
+        if (auto* score = levelMgr->userInfoForAccountID(snapshot.accountId); score != nullptr) {
+            snapshot.hasStats = true;
+            snapshot.stars = score->m_stars;
+            snapshot.moons = score->m_moons;
+            snapshot.demons = score->m_demons;
+            snapshot.userCoins = score->m_userCoins;
+            snapshot.secretCoins = score->m_secretCoins;
+
+            if (!score->m_userName.empty()) {
+                snapshot.username = score->m_userName;
+            }
+            if (snapshot.userId <= 0) {
+                snapshot.userId = score->m_userID;
+            }
+        } else {
+            this->requestProfileSnapshotIfNeeded(snapshot.accountId, snapshot.userId);
+        }
+    }
+
+    return snapshot;
+}
+
+void SyncManager::requestProfileSnapshotIfNeeded(int accountId, int userId) {
+    auto* levelMgr = GameLevelManager::sharedState();
+    if (levelMgr == nullptr || accountId <= 0) {
+        return;
+    }
+
+    const auto nowMs = nowUnixMs();
+    if (nowMs - m_lastProfileRequestMs < 30'000) {
+        return;
+    }
+    m_lastProfileRequestMs = nowMs;
+
+    if (userId > 0) {
+        levelMgr->getGJUserInfo(userId);
+    }
+    levelMgr->getGJUserInfo(accountId);
+
+    if (this->isDebugEnabled()) {
+        log::debug(
+            "[ProgressSync] Requested profile snapshot (accountId={}, userId={})",
+            accountId,
+            userId
+        );
+    }
+}
+
 void SyncManager::enqueueFromLevel(GJGameLevel* level, bool levelCompleted) {
     if (!this->isEnabled() || level == nullptr) {
         return;
@@ -118,14 +272,7 @@ void SyncManager::enqueueFromLevel(GJGameLevel* level, bool levelCompleted) {
     const int practice = clampPercent(level->m_practicePercent);
     const int attempts = std::max(0, static_cast<int>(level->m_attempts.value()));
     const auto snapshot = std::tuple(normal, practice, attempts);
-    auto* accountMgr = GJAccountManager::sharedState();
-    auto* gameMgr = GameManager::sharedState();
-    const int gdAccountId = accountMgr ? accountMgr->m_accountID : 0;
-    const bool gdHasAccount = gdAccountId > 0;
-    const std::string gdUsername =
-        accountMgr && !accountMgr->m_username.empty() ? accountMgr->m_username : "";
-    const std::string gdPlayerName =
-        gameMgr && !gameMgr->m_playerName.empty() ? gameMgr->m_playerName : "";
+    const auto profile = this->collectProfileSnapshot();
 
     const auto found = m_lastSeenByLevel.find(levelId);
     if (found != m_lastSeenByLevel.end() && found->second == snapshot) {
@@ -139,14 +286,31 @@ void SyncManager::enqueueFromLevel(GJGameLevel* level, bool levelCompleted) {
         { "normal", normal },
         { "practice", practice },
         { "attempts", attempts },
-        { "clientTs", fmt::format("{}", std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch())
-                                            .count()) },
+        { "clientTs", fmt::format("{}", nowUnixMs()) },
         { "source", levelCompleted ? "levelComplete" : "onQuit" },
-        { "gdHasAccount", gdHasAccount },
-        { "gdAccountId", gdAccountId },
-        { "gdUsername", gdUsername },
-        { "gdPlayerName", gdPlayerName },
+        { "gdHasAccount", profile.hasAccount },
+        { "gdAccountId", profile.accountId },
+        { "gdUserId", profile.userId },
+        { "gdUsername", profile.username },
+        { "gdPlayerName", profile.playerName },
+        { "gdStatsAvailable", profile.hasStats },
+        { "gdStars", profile.stars },
+        { "gdMoons", profile.moons },
+        { "gdDemons", profile.demons },
+        { "gdUserCoins", profile.userCoins },
+        { "gdSecretCoins", profile.secretCoins },
+        { "gdIconCube", profile.iconCube },
+        { "gdIconShip", profile.iconShip },
+        { "gdIconBall", profile.iconBall },
+        { "gdIconUfo", profile.iconUfo },
+        { "gdIconWave", profile.iconWave },
+        { "gdIconRobot", profile.iconRobot },
+        { "gdIconSpider", profile.iconSpider },
+        { "gdIconSwing", profile.iconSwing },
+        { "gdIconJetpack", profile.iconJetpack },
+        { "gdColor1", profile.color1 },
+        { "gdColor2", profile.color2 },
+        { "gdGlowEnabled", profile.glowEnabled },
     });
 
     this->appendQueue(payload);
@@ -157,6 +321,69 @@ void SyncManager::onMenuReady() {
     this->maybeWarnNoAccount();
     this->runPing();
     this->runFlush();
+}
+
+void SyncManager::onProfilePossiblyChanged() {
+    if (!this->isEnabled()) {
+        return;
+    }
+
+    const std::string url = this->serverUrl();
+    const std::string key = this->apiKey();
+    if (url.empty() || key.empty()) {
+        return;
+    }
+
+    const auto profile = this->collectProfileSnapshot();
+    const auto nowMs = nowUnixMs();
+    const std::string signature = fmt::format(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        profile.accountId,
+        profile.userId,
+        profile.iconCube,
+        profile.iconShip,
+        profile.iconBall,
+        profile.iconUfo,
+        profile.iconWave,
+        profile.iconRobot,
+        profile.iconSpider,
+        profile.iconSwing,
+        profile.iconJetpack,
+        profile.color1,
+        profile.color2,
+        profile.glowEnabled,
+        profile.username
+    );
+
+    const bool changed = signature != m_lastProfileSignature;
+    const bool cooldownElapsed = (nowMs - m_lastProfilePingMs) >= 2'000;
+    if (!changed && !cooldownElapsed) {
+        return;
+    }
+
+    m_lastProfileSignature = signature;
+    m_lastProfilePingMs = nowMs;
+    if (this->isDebugEnabled()) {
+        log::debug(
+            "[ProgressSync] Profile change ping queued (changed={}, cooldownElapsed={}, accountId={}, cube={}, ship={}, ball={}, ufo={}, wave={}, robot={}, spider={}, swing={}, jetpack={}, c1={}, c2={}, glow={})",
+            changed,
+            cooldownElapsed,
+            profile.accountId,
+            profile.iconCube,
+            profile.iconShip,
+            profile.iconBall,
+            profile.iconUfo,
+            profile.iconWave,
+            profile.iconRobot,
+            profile.iconSpider,
+            profile.iconSwing,
+            profile.iconJetpack,
+            profile.color1,
+            profile.color2,
+            profile.glowEnabled
+        );
+    }
+    this->runPing();
 }
 
 void SyncManager::flushQueue() {
@@ -224,24 +451,34 @@ void SyncManager::runPing() {
 }
 
 arc::Future<Result<>> SyncManager::pingAsync() {
-    auto* accountMgr = GJAccountManager::sharedState();
-    auto* gameMgr = GameManager::sharedState();
-    const int gdAccountId = accountMgr ? accountMgr->m_accountID : 0;
-    const bool gdHasAccount = gdAccountId > 0;
-    const std::string gdUsername =
-        accountMgr && !accountMgr->m_username.empty() ? accountMgr->m_username : "";
-    const std::string gdPlayerName =
-        gameMgr && !gameMgr->m_playerName.empty() ? gameMgr->m_playerName : "";
+    const auto profile = this->collectProfileSnapshot();
 
     matjson::Value payload = matjson::makeObject({
-        { "clientTs", fmt::format("{}", std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch())
-                                            .count()) },
+        { "clientTs", fmt::format("{}", nowUnixMs()) },
         { "source", "menuPing" },
-        { "gdHasAccount", gdHasAccount },
-        { "gdAccountId", gdAccountId },
-        { "gdUsername", gdUsername },
-        { "gdPlayerName", gdPlayerName },
+        { "gdHasAccount", profile.hasAccount },
+        { "gdAccountId", profile.accountId },
+        { "gdUserId", profile.userId },
+        { "gdUsername", profile.username },
+        { "gdPlayerName", profile.playerName },
+        { "gdStatsAvailable", profile.hasStats },
+        { "gdStars", profile.stars },
+        { "gdMoons", profile.moons },
+        { "gdDemons", profile.demons },
+        { "gdUserCoins", profile.userCoins },
+        { "gdSecretCoins", profile.secretCoins },
+        { "gdIconCube", profile.iconCube },
+        { "gdIconShip", profile.iconShip },
+        { "gdIconBall", profile.iconBall },
+        { "gdIconUfo", profile.iconUfo },
+        { "gdIconWave", profile.iconWave },
+        { "gdIconRobot", profile.iconRobot },
+        { "gdIconSpider", profile.iconSpider },
+        { "gdIconSwing", profile.iconSwing },
+        { "gdIconJetpack", profile.iconJetpack },
+        { "gdColor1", profile.color1 },
+        { "gdColor2", profile.color2 },
+        { "gdGlowEnabled", profile.glowEnabled },
     });
 
     const std::string pingUrl = pingUrlFromProgressUrl(this->serverUrl());
