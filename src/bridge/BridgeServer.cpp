@@ -166,25 +166,45 @@ bool tryOpenLevelPage(int levelId) {
     if (!manager->hasDownloadedLevel(levelId)) return false;
 
     auto* level = getBestLevel(manager, levelId);
-    if (!level || !hasCreatorMetadata(level)) return false;
+    if (!level) return false;
 
     manager->gotoLevelPage(level);
     return true;
 }
 
-void scheduleOpenWhenDownloaded(int levelId) {
+bool tryOpenUncachedLevelInfoScene(int levelId) {
+    auto* level = GJGameLevel::create();
+    if (!level) return false;
+
+    level->m_levelID = levelId;
+    level->m_levelName = fmt::format("Level {}", levelId);
+    level->m_creatorName = "Unknown";
+    level->m_audioTrack = 0;
+    level->m_songID = 0;
+
+    auto* scene = LevelInfoLayer::scene(level, false);
+    if (!scene) return false;
+
+    auto* director = cocos2d::CCDirector::sharedDirector();
+    if (!director) return false;
+
+    director->replaceScene(cocos2d::CCTransitionFade::create(0.2f, scene));
+    return true;
+}
+
+void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
     if (!beginPendingOpen(levelId)) {
         return;
     }
 
-    std::thread([levelId]() {
-        constexpr int kMaxAttempts = 80; // ~20 seconds
+    std::thread([levelId, requireCreatorMetadata]() {
+        constexpr int kMaxAttempts = 60; // ~9 seconds
         for (int i = 0; i < kMaxAttempts; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
             std::promise<bool> openedPromise;
             auto openedFuture = openedPromise.get_future();
-            geode::queueInMainThread([levelId, p = std::move(openedPromise)]() mutable {
+            geode::queueInMainThread([levelId, requireCreatorMetadata, p = std::move(openedPromise)]() mutable {
                 auto* manager = GameLevelManager::sharedState();
                 if (!manager || !manager->hasDownloadedLevel(levelId)) {
                     p.set_value(false);
@@ -192,7 +212,12 @@ void scheduleOpenWhenDownloaded(int levelId) {
                 }
 
                 auto* level = getBestLevel(manager, levelId);
-                if (!level || !hasCreatorMetadata(level)) {
+                if (!level) {
+                    p.set_value(false);
+                    return;
+                }
+
+                if (requireCreatorMetadata && !hasCreatorMetadata(level)) {
                     p.set_value(false);
                     return;
                 }
@@ -212,22 +237,11 @@ void scheduleOpenWhenDownloaded(int levelId) {
             }
         }
 
-        geode::queueInMainThread([levelId]() {
-            auto* manager = GameLevelManager::sharedState();
-            if (!manager) {
-                log::warn("[DashDiceBridge] Download did not resolve for level {} (manager unavailable)", levelId);
+        geode::queueInMainThread([levelId, requireCreatorMetadata]() {
+            if (requireCreatorMetadata) {
+                log::warn("[DashDiceBridge] Timed out waiting for creator metadata on level {}", levelId);
                 return;
             }
-
-            // Fallback: open even if creator metadata stayed unavailable after timeout.
-            if (manager->hasDownloadedLevel(levelId)) {
-                if (auto* level = getBestLevel(manager, levelId)) {
-                    manager->gotoLevelPage(level);
-                    log::warn("[DashDiceBridge] Opened level {} after timeout without full creator metadata", levelId);
-                    return;
-                }
-            }
-
             log::warn("[DashDiceBridge] Download did not resolve into openable level page for {}", levelId);
         });
         endPendingOpen(levelId);
@@ -244,25 +258,37 @@ void queueOpenLevel(int levelId) {
 
         const bool wasDownloaded = manager->hasDownloadedLevel(levelId);
 
-        if (tryOpenLevelPage(levelId)) {
+        // Fast path: open immediately if level already exists locally.
+        if (wasDownloaded && tryOpenLevelPage(levelId)) {
+            auto* level = getBestLevel(manager, levelId);
             if (Mod::get()->getSettingValue<bool>("debug-logs")) {
-                log::debug("[DashDiceBridge] Opened level {} from cache", levelId);
+                log::debug("[DashDiceBridge] Opened level {} immediately from cache", levelId);
+            }
+
+            // Refresh in background only if creator metadata is currently missing.
+            if (level && !hasCreatorMetadata(level)) {
+                manager->downloadLevel(levelId, false, 0);
+                if (Mod::get()->getSettingValue<bool>("debug-logs")) {
+                    log::debug("[DashDiceBridge] Creator missing on cached level {}, refreshing in background", levelId);
+                }
+                scheduleOpenWhenDownloaded(levelId, true);
             }
             return;
         }
 
-        // If cache exists but creator metadata is still missing, refresh the level payload.
+        // Uncached path: request download and open placeholder right away.
         manager->downloadLevel(levelId, false, 0);
+        const bool openedPlaceholder = tryOpenUncachedLevelInfoScene(levelId);
 
         if (Mod::get()->getSettingValue<bool>("debug-logs")) {
-            if (wasDownloaded) {
-                log::debug("[DashDiceBridge] Waiting for creator metadata before opening cached level {}", levelId);
+            if (openedPlaceholder) {
+                log::debug("[DashDiceBridge] Opened placeholder for level {} while downloading", levelId);
             } else {
-                log::debug("[DashDiceBridge] Waiting for download + creator metadata before opening level {}", levelId);
+                log::debug("[DashDiceBridge] Download requested for level {}; waiting to open", levelId);
             }
         }
 
-        scheduleOpenWhenDownloaded(levelId);
+        scheduleOpenWhenDownloaded(levelId, false);
     });
 }
 } // namespace
