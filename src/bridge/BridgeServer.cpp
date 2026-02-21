@@ -169,6 +169,49 @@ std::string describeLevelState(char const* label, GJGameLevel* level) {
     );
 }
 
+int resolveAccountId(GameLevelManager* manager, GJGameLevel* level) {
+    if (!manager || !level) return 0;
+    auto accountId = level->m_accountID.value();
+    if (accountId > 0) return accountId;
+
+    const int userId = level->m_userID.value();
+    if (userId <= 0) return 0;
+
+    const int mappedByApi = manager->accountIDForUserID(userId);
+    if (mappedByApi > 0) {
+        level->m_accountID = { mappedByApi, mappedByApi };
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Resolved account_id {} from user_id {} via accountIDForUserID",
+                mappedByApi,
+                userId
+            );
+        }
+        return mappedByApi;
+    }
+
+    int mappedAccountId = 0;
+    if (manager->m_userIDtoAccountIDDict) {
+        if (auto* value = manager->m_userIDtoAccountIDDict->valueForKey(userId)) {
+            mappedAccountId = value->intValue();
+        }
+    }
+
+    if (mappedAccountId > 0) {
+        level->m_accountID = { mappedAccountId, mappedAccountId };
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Resolved account_id {} from user_id {} via cache map",
+                mappedAccountId,
+                userId
+            );
+        }
+        return mappedAccountId;
+    }
+
+    return 0;
+}
+
 bool isUsableName(std::string const& name) {
     auto normalized = toLower(trim(name));
     return !normalized.empty() && normalized != "-" && normalized != "unknown" && normalized != "na";
@@ -192,8 +235,15 @@ std::string resolveCreatorNameFromCaches(GameLevelManager* manager, GJGameLevel*
         }
     }
 
-    const int accountId = level->m_accountID.value();
+    const int accountId = resolveAccountId(manager, level);
     if (accountId > 0) {
+        auto tryName = manager->tryGetUsername(accountId);
+        if (isUsableName(tryName)) {
+            if (bridgeDebugEnabled()) {
+                log::debug("[DashDiceBridge] Creator cache hit via tryGetUsername account_id {} -> '{}'", accountId, tryName);
+            }
+            return tryName;
+        }
         if (auto* score = manager->userInfoForAccountID(accountId)) {
             if (isUsableName(score->m_userName)) {
                 if (bridgeDebugEnabled()) {
@@ -335,14 +385,55 @@ bool tryOpenUncachedLevelInfoScene(int levelId) {
     return true;
 }
 
+void requestCreatorMetadata(GameLevelManager* manager, int levelId, GJGameLevel* level) {
+    if (!manager) return;
+
+    const int userId = level ? level->m_userID.value() : 0;
+    const int accountId = resolveAccountId(manager, level);
+
+    if (accountId > 0) {
+        manager->getGJUserInfo(accountId);
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Requested creator via getGJUserInfo(account_id={}) for level {}",
+                accountId,
+                levelId
+            );
+        }
+    }
+
+    // Probe user_id path too; some responses only populate user_id initially.
+    if (userId > 0 && userId != accountId) {
+        manager->getGJUserInfo(userId);
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Requested creator via getGJUserInfo(user_id={} probe) for level {}",
+                userId,
+                levelId
+            );
+        }
+
+        if (auto* userSearch = GJSearchObject::create(SearchType::Users, fmt::format("{}", userId))) {
+            manager->getUsers(userSearch);
+            if (bridgeDebugEnabled()) {
+                log::debug(
+                    "[DashDiceBridge] Requested creator via getUsers(SearchType::Users, '{}') for level {}",
+                    userId,
+                    levelId
+                );
+            }
+        }
+    }
+}
+
 void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
     if (!beginPendingOpen(levelId)) {
         return;
     }
 
     std::thread([levelId, requireCreatorMetadata]() {
-        constexpr int kMaxAttempts = 60; // ~9 seconds
-        for (int i = 0; i < kMaxAttempts; ++i) {
+        const int maxAttempts = requireCreatorMetadata ? 25 : 60;
+        for (int i = 0; i < maxAttempts; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
             std::promise<bool> openedPromise;
@@ -399,11 +490,30 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
         }
 
         geode::queueInMainThread([levelId, requireCreatorMetadata]() {
+            auto* manager = GameLevelManager::sharedState();
+            if (manager && manager->hasDownloadedLevel(levelId)) {
+                char const* source = nullptr;
+                if (auto* level = getBestLevel(manager, levelId, &source)) {
+                    manager->gotoLevelPage(level);
+                    if (requireCreatorMetadata) {
+                        log::warn(
+                            "[DashDiceBridge] Opened level {} after creator wait timeout from {}: {}",
+                            levelId,
+                            source ? source : "unknown",
+                            describeLevelState("level", level)
+                        );
+                    } else {
+                        log::warn("[DashDiceBridge] Opened level {} after download wait timeout", levelId);
+                    }
+                    return;
+                }
+            }
+
             if (requireCreatorMetadata) {
                 log::warn("[DashDiceBridge] Timed out waiting for creator metadata on level {}", levelId);
-                return;
+            } else {
+                log::warn("[DashDiceBridge] Download did not resolve into openable level page for {}", levelId);
             }
-            log::warn("[DashDiceBridge] Download did not resolve into openable level page for {}", levelId);
         });
         endPendingOpen(levelId);
     }).detach();
@@ -419,35 +529,35 @@ void queueOpenLevel(int levelId) {
 
         const bool wasDownloaded = manager->hasDownloadedLevel(levelId);
 
-        // Fast path: open immediately if level already exists locally.
-        if (wasDownloaded && tryOpenLevelPage(levelId)) {
-            char const* source = nullptr;
-            auto* level = getBestLevel(manager, levelId, &source);
+        char const* cachedSource = nullptr;
+        auto* cachedLevel = wasDownloaded ? getBestLevel(manager, levelId, &cachedSource) : nullptr;
+
+        // Fast path: only immediate-open when cached level already has creator metadata.
+        if (cachedLevel && hasCreatorMetadata(cachedLevel)) {
+            manager->gotoLevelPage(cachedLevel);
             if (Mod::get()->getSettingValue<bool>("debug-logs")) {
                 log::debug(
                     "[DashDiceBridge] Opened level {} immediately from cache (source={}): {}",
                     levelId,
-                    source ? source : "unknown",
-                    describeLevelState("level", level)
+                    cachedSource ? cachedSource : "unknown",
+                    describeLevelState("level", cachedLevel)
                 );
-            }
-
-            // Refresh in background only if creator metadata is currently missing.
-            if (level && !hasCreatorMetadata(level)) {
-                const int accountId = level->m_accountID.value();
-                if (accountId > 0) {
-                    manager->getGJUserInfo(accountId);
-                }
-                manager->downloadLevel(levelId, false, 0);
-                if (Mod::get()->getSettingValue<bool>("debug-logs")) {
-                    log::debug("[DashDiceBridge] Creator missing on cached level {}, refreshing in background", levelId);
-                }
-                scheduleOpenWhenDownloaded(levelId, true);
             }
             return;
         }
 
-        // Uncached path: request download and open placeholder right away.
+        if (cachedLevel && Mod::get()->getSettingValue<bool>("debug-logs")) {
+            log::debug(
+                "[DashDiceBridge] Cached level {} missing creator metadata (source={}): {}",
+                levelId,
+                cachedSource ? cachedSource : "unknown",
+                describeLevelState("level", cachedLevel)
+            );
+        }
+
+        requestCreatorMetadata(manager, levelId, cachedLevel);
+
+        // Fetch/refresh level and open placeholder while waiting for a creator-ready level page.
         manager->downloadLevel(levelId, false, 0);
         const bool openedPlaceholder = tryOpenUncachedLevelInfoScene(levelId);
 
@@ -459,7 +569,7 @@ void queueOpenLevel(int levelId) {
             }
         }
 
-        scheduleOpenWhenDownloaded(levelId, false);
+        scheduleOpenWhenDownloaded(levelId, true);
     });
 }
 } // namespace
