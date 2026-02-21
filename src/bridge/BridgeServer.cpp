@@ -152,10 +152,72 @@ bool hasCreatorMetadata(GJGameLevel* level) {
     return !creator.empty() && creator != "-" && creator != "unknown" && creator != "na";
 }
 
+bool isUsableName(std::string const& name) {
+    auto normalized = toLower(trim(name));
+    return !normalized.empty() && normalized != "-" && normalized != "unknown" && normalized != "na";
+}
+
+std::string resolveCreatorNameFromCaches(GameLevelManager* manager, GJGameLevel* level) {
+    if (!manager || !level) return "";
+
+    if (isUsableName(level->m_creatorName)) {
+        return level->m_creatorName;
+    }
+
+    const int userId = level->m_userID.value();
+    if (userId > 0) {
+        auto byUserId = manager->userNameForUserID(userId);
+        if (isUsableName(byUserId)) {
+            return byUserId;
+        }
+    }
+
+    const int accountId = level->m_accountID.value();
+    if (accountId > 0) {
+        if (auto* score = manager->userInfoForAccountID(accountId)) {
+            if (isUsableName(score->m_userName)) {
+                return score->m_userName;
+            }
+        }
+    }
+
+    return "";
+}
+
+void hydrateCreatorName(GameLevelManager* manager, GJGameLevel* target, GJGameLevel* fallback = nullptr) {
+    if (!target || hasCreatorMetadata(target)) return;
+
+    if (fallback && hasCreatorMetadata(fallback)) {
+        target->m_creatorName = fallback->m_creatorName;
+        return;
+    }
+
+    const auto resolved = resolveCreatorNameFromCaches(manager, target);
+    if (isUsableName(resolved)) {
+        target->m_creatorName = resolved;
+        return;
+    }
+
+    if (fallback) {
+        const auto fallbackResolved = resolveCreatorNameFromCaches(manager, fallback);
+        if (isUsableName(fallbackResolved)) {
+            target->m_creatorName = fallbackResolved;
+        }
+    }
+}
+
 GJGameLevel* getBestLevel(GameLevelManager* manager, int levelId) {
     if (!manager) return nullptr;
-    if (auto* saved = manager->getSavedLevel(levelId)) return saved;
-    return manager->getMainLevel(levelId, false);
+    auto* saved = manager->getSavedLevel(levelId);
+    auto* main = manager->getMainLevel(levelId, false);
+
+    if (saved) hydrateCreatorName(manager, saved, main);
+    if (main) hydrateCreatorName(manager, main, saved);
+
+    if (saved && hasCreatorMetadata(saved)) return saved;
+    if (main && hasCreatorMetadata(main)) return main;
+    if (saved) return saved;
+    return main;
 }
 
 bool tryOpenLevelPage(int levelId) {
@@ -267,6 +329,10 @@ void queueOpenLevel(int levelId) {
 
             // Refresh in background only if creator metadata is currently missing.
             if (level && !hasCreatorMetadata(level)) {
+                const int accountId = level->m_accountID.value();
+                if (accountId > 0) {
+                    manager->getGJUserInfo(accountId);
+                }
                 manager->downloadLevel(levelId, false, 0);
                 if (Mod::get()->getSettingValue<bool>("debug-logs")) {
                     log::debug("[DashDiceBridge] Creator missing on cached level {}, refreshing in background", levelId);
