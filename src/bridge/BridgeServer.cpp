@@ -149,7 +149,8 @@ void endPendingOpen(int levelId) {
 bool hasCreatorMetadata(GJGameLevel* level) {
     if (!level) return false;
     auto creator = toLower(trim(level->m_creatorName));
-    return !creator.empty() && creator != "-" && creator != "unknown" && creator != "na";
+    return !creator.empty() && creator != "-" && creator != "unknown" && creator != "na" &&
+           creator != "usernamedefault";
 }
 
 bool bridgeDebugEnabled() {
@@ -160,11 +161,13 @@ bool bridgeDebugEnabled() {
 std::string describeLevelState(char const* label, GJGameLevel* level) {
     if (!level) return fmt::format("{}=null", label);
     return fmt::format(
-        "{}{{creator='{}', user_id={}, account_id={}, has_creator={}}}",
+        "{}{{name='{}', creator='{}', user_id={}, account_id={}, has_name={}, has_creator={}}}",
         label,
+        trim(level->m_levelName),
         trim(level->m_creatorName),
         level->m_userID.value(),
         level->m_accountID.value(),
+        (!trim(level->m_levelName).empty() ? "yes" : "no"),
         hasCreatorMetadata(level) ? "yes" : "no"
     );
 }
@@ -214,7 +217,27 @@ int resolveAccountId(GameLevelManager* manager, GJGameLevel* level) {
 
 bool isUsableName(std::string const& name) {
     auto normalized = toLower(trim(name));
-    return !normalized.empty() && normalized != "-" && normalized != "unknown" && normalized != "na";
+    return !normalized.empty() && normalized != "-" && normalized != "unknown" && normalized != "na" &&
+           normalized != "usernamedefault";
+}
+
+bool isUsableLevelName(GJGameLevel* level, int levelId) {
+    if (!level) return false;
+    auto name = trim(level->m_levelName);
+    if (name.empty()) return false;
+
+    auto lowered = toLower(name);
+    if (lowered == fmt::format("level {}", levelId) || lowered == fmt::format("level{}", levelId)) {
+        return false;
+    }
+    if (name == fmt::format("{}", levelId)) {
+        return false;
+    }
+    return true;
+}
+
+bool hasOpenReadyMetadata(GJGameLevel* level, int levelId) {
+    return isUsableLevelName(level, levelId) && hasCreatorMetadata(level);
 }
 
 std::string resolveCreatorNameFromCaches(GameLevelManager* manager, GJGameLevel* level) {
@@ -413,15 +436,16 @@ void requestCreatorMetadata(GameLevelManager* manager, int levelId, GJGameLevel*
             );
         }
 
-        if (auto* userSearch = GJSearchObject::create(SearchType::Users, fmt::format("{}", userId))) {
-            manager->getUsers(userSearch);
-            if (bridgeDebugEnabled()) {
-                log::debug(
-                    "[DashDiceBridge] Requested creator via getUsers(SearchType::Users, '{}') for level {}",
-                    userId,
-                    levelId
-                );
-            }
+    }
+
+    // Also force a level search refresh to populate title/creator caches used by LevelInfo.
+    if (auto* levelSearch = GJSearchObject::create(SearchType::Search, fmt::format("{}", levelId))) {
+        manager->getOnlineLevels(levelSearch);
+        if (bridgeDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Requested level metadata via getOnlineLevels(SearchType::Search, '{}')",
+                levelId
+            );
         }
     }
 }
@@ -452,10 +476,10 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
                     return;
                 }
 
-                if (requireCreatorMetadata && !hasCreatorMetadata(level)) {
+                if (requireCreatorMetadata && !hasOpenReadyMetadata(level, levelId)) {
                     if (bridgeDebugEnabled() && (attempt == 0 || attempt % 10 == 0)) {
                         log::debug(
-                            "[DashDiceBridge] Still waiting creator metadata for level {} at attempt {} from {}: {}",
+                            "[DashDiceBridge] Still waiting full metadata for level {} at attempt {} from {}: {}",
                             levelId,
                             attempt,
                             source ? source : "unknown",
@@ -497,7 +521,7 @@ void scheduleOpenWhenDownloaded(int levelId, bool requireCreatorMetadata) {
                     manager->gotoLevelPage(level);
                     if (requireCreatorMetadata) {
                         log::warn(
-                            "[DashDiceBridge] Opened level {} after creator wait timeout from {}: {}",
+                            "[DashDiceBridge] Opened level {} after metadata wait timeout from {}: {}",
                             levelId,
                             source ? source : "unknown",
                             describeLevelState("level", level)
@@ -533,7 +557,7 @@ void queueOpenLevel(int levelId) {
         auto* cachedLevel = wasDownloaded ? getBestLevel(manager, levelId, &cachedSource) : nullptr;
 
         // Fast path: only immediate-open when cached level already has creator metadata.
-        if (cachedLevel && hasCreatorMetadata(cachedLevel)) {
+        if (cachedLevel && hasOpenReadyMetadata(cachedLevel, levelId)) {
             manager->gotoLevelPage(cachedLevel);
             if (Mod::get()->getSettingValue<bool>("debug-logs")) {
                 log::debug(
@@ -548,7 +572,7 @@ void queueOpenLevel(int levelId) {
 
         if (cachedLevel && Mod::get()->getSettingValue<bool>("debug-logs")) {
             log::debug(
-                "[DashDiceBridge] Cached level {} missing creator metadata (source={}): {}",
+                "[DashDiceBridge] Cached level {} missing open-ready metadata (source={}): {}",
                 levelId,
                 cachedSource ? cachedSource : "unknown",
                 describeLevelState("level", cachedLevel)
