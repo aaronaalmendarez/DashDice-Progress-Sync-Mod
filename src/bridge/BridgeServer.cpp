@@ -146,53 +146,29 @@ void endPendingOpen(int levelId) {
     g_pendingOpenLevels.erase(levelId);
 }
 
-bool tryOpenLevelPage(int levelId) {
-    auto* manager = GameLevelManager::sharedState();
-    if (!manager) {
-        return false;
-    }
-
-    // Only treat as cache-hit when GD confirms level data is downloaded.
-    if (!manager->hasDownloadedLevel(levelId)) {
-        return false;
-    }
-
-    if (auto* saved = manager->getSavedLevel(levelId)) {
-        manager->gotoLevelPage(saved);
-        return true;
-    }
-
-    if (auto* level = manager->getMainLevel(levelId, false)) {
-        manager->gotoLevelPage(level);
-        return true;
-    }
-
-    return false;
+bool hasCreatorMetadata(GJGameLevel* level) {
+    if (!level) return false;
+    auto creator = toLower(trim(level->m_creatorName));
+    return !creator.empty() && creator != "-" && creator != "unknown" && creator != "na";
 }
 
-bool tryOpenUncachedLevelInfoScene(int levelId) {
-    auto* level = GJGameLevel::create();
-    if (!level) {
-        return false;
-    }
+GJGameLevel* getBestLevel(GameLevelManager* manager, int levelId) {
+    if (!manager) return nullptr;
+    if (auto* saved = manager->getSavedLevel(levelId)) return saved;
+    return manager->getMainLevel(levelId, false);
+}
 
-    level->m_levelID = levelId;
-    level->m_levelName = fmt::format("Level {}", levelId);
-    level->m_creatorName = "Unknown";
-    level->m_audioTrack = 0;
-    level->m_songID = 0;
+bool tryOpenLevelPage(int levelId) {
+    auto* manager = GameLevelManager::sharedState();
+    if (!manager) return false;
 
-    auto* scene = LevelInfoLayer::scene(level, false);
-    if (!scene) {
-        return false;
-    }
+    // Only treat as cache-hit when GD confirms level data is downloaded.
+    if (!manager->hasDownloadedLevel(levelId)) return false;
 
-    auto* director = cocos2d::CCDirector::sharedDirector();
-    if (!director) {
-        return false;
-    }
+    auto* level = getBestLevel(manager, levelId);
+    if (!level || !hasCreatorMetadata(level)) return false;
 
-    director->replaceScene(cocos2d::CCTransitionFade::create(0.25f, scene));
+    manager->gotoLevelPage(level);
     return true;
 }
 
@@ -215,24 +191,14 @@ void scheduleOpenWhenDownloaded(int levelId) {
                     return;
                 }
 
-                bool opened = false;
-                if (auto* saved = manager->getSavedLevel(levelId)) {
-                    if (auto* scene = LevelInfoLayer::scene(saved, false)) {
-                        if (auto* director = cocos2d::CCDirector::sharedDirector()) {
-                            director->replaceScene(cocos2d::CCTransitionFade::create(0.15f, scene));
-                            opened = true;
-                        }
-                    }
-                } else if (auto* level = manager->getMainLevel(levelId, false)) {
-                    if (auto* scene = LevelInfoLayer::scene(level, false)) {
-                        if (auto* director = cocos2d::CCDirector::sharedDirector()) {
-                            director->replaceScene(cocos2d::CCTransitionFade::create(0.15f, scene));
-                            opened = true;
-                        }
-                    }
+                auto* level = getBestLevel(manager, levelId);
+                if (!level || !hasCreatorMetadata(level)) {
+                    p.set_value(false);
+                    return;
                 }
 
-                p.set_value(opened);
+                manager->gotoLevelPage(level);
+                p.set_value(true);
             });
 
             if (openedFuture.get()) {
@@ -247,6 +213,21 @@ void scheduleOpenWhenDownloaded(int levelId) {
         }
 
         geode::queueInMainThread([levelId]() {
+            auto* manager = GameLevelManager::sharedState();
+            if (!manager) {
+                log::warn("[DashDiceBridge] Download did not resolve for level {} (manager unavailable)", levelId);
+                return;
+            }
+
+            // Fallback: open even if creator metadata stayed unavailable after timeout.
+            if (manager->hasDownloadedLevel(levelId)) {
+                if (auto* level = getBestLevel(manager, levelId)) {
+                    manager->gotoLevelPage(level);
+                    log::warn("[DashDiceBridge] Opened level {} after timeout without full creator metadata", levelId);
+                    return;
+                }
+            }
+
             log::warn("[DashDiceBridge] Download did not resolve into openable level page for {}", levelId);
         });
         endPendingOpen(levelId);
@@ -270,29 +251,18 @@ void queueOpenLevel(int levelId) {
             return;
         }
 
-        // For uncached levels, request download first so LevelInfo can populate.
-        if (!wasDownloaded) {
-            manager->downloadLevel(levelId, false, 0);
-        }
+        // If cache exists but creator metadata is still missing, refresh the level payload.
+        manager->downloadLevel(levelId, false, 0);
 
-        if (tryOpenUncachedLevelInfoScene(levelId)) {
-            if (Mod::get()->getSettingValue<bool>("debug-logs")) {
-                if (wasDownloaded) {
-                    log::debug("[DashDiceBridge] Opened level {} info scene without cache route", levelId);
-                } else {
-                    log::debug("[DashDiceBridge] Opened uncached level {} info scene (download requested)", levelId);
-                }
+        if (Mod::get()->getSettingValue<bool>("debug-logs")) {
+            if (wasDownloaded) {
+                log::debug("[DashDiceBridge] Waiting for creator metadata before opening cached level {}", levelId);
+            } else {
+                log::debug("[DashDiceBridge] Waiting for download + creator metadata before opening level {}", levelId);
             }
-            scheduleOpenWhenDownloaded(levelId);
-            return;
         }
 
-        if (!wasDownloaded) {
-            log::warn("[DashDiceBridge] Could not open uncached level {} immediately; download requested", levelId);
-            scheduleOpenWhenDownloaded(levelId);
-        } else {
-            log::warn("[DashDiceBridge] Could not open downloaded level {}", levelId);
-        }
+        scheduleOpenWhenDownloaded(levelId);
     });
 }
 } // namespace
