@@ -1,6 +1,6 @@
 {
-  "geode": "5.0.0-beta.3",
-  "version": "v0.1.4",
+  "geode": "5.0.0-beta.4",
+  "version": "v0.1.5",
   "id": "dashdice.progress_sync",
   "name": "DashDice Progress Sync",
   "developers": [
