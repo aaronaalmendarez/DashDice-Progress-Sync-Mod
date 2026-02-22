@@ -6,7 +6,7 @@
   "developers": [
     "aaron"
   ],
-  "description": "Sync your Geometry Dash progress to DashDice and open levels from the website.",
+  "description": "Sync progress, manage pairing, and open levels from https://dash.motioncore.xyz/.",
   "repository": "https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod",
   "gd": {
     "win": "2.2081",
