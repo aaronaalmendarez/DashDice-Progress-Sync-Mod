@@ -1,12 +1,16 @@
 {
   "geode": "5.0.0-beta.3",
-  "version": "v0.1.3",
+  "version": "v0.1.4",
   "id": "dashdice.progress_sync",
   "name": "DashDice Progress Sync",
   "developers": [
     "aaron"
   ],
-  "description": "Sync progress, manage pairing, and open levels from https://dash.motioncore.xyz/.",
+  "description": "Official dashboard: https://dash.motioncore.xyz/ - sync progress, pair devices, and open levels in Geometry Dash.",
+  "links": {
+    "homepage": "https://dash.motioncore.xyz/",
+    "source": "https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod"
+  },
   "repository": "https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod",
   "gd": {
     "win": "2.2081",
