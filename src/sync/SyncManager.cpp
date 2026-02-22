@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <random>
+#include <regex>
 #include <string>
+#include <thread>
 
 #include <fmt/core.h>
 #include <Geode/Result.hpp>
@@ -12,10 +15,13 @@
 #include <Geode/binding/GameManager.hpp>
 #include <Geode/binding/GameLevelManager.hpp>
 #include <Geode/loader/Log.hpp>
+#include <Geode/loader/Loader.hpp>
 #include <Geode/loader/Mod.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/utils/async.hpp>
 #include <Geode/utils/web.hpp>
+
+#include "../bridge/LocalBridge.hpp"
 
 using namespace geode::prelude;
 
@@ -133,6 +139,34 @@ std::string pingUrlFromProgressUrl(const std::string& progressUrl) {
         return progressUrl.substr(0, progressUrl.size() - suffixLen) + "/ping";
     }
     return progressUrl;
+}
+
+std::string commandsUrlFromProgressUrl(const std::string& progressUrl) {
+    constexpr const char* suffix = "/progress";
+    const auto suffixLen = std::char_traits<char>::length(suffix);
+    if (progressUrl.size() >= suffixLen &&
+        progressUrl.compare(progressUrl.size() - suffixLen, suffixLen, suffix) == 0) {
+        return progressUrl.substr(0, progressUrl.size() - suffixLen) + "/commands";
+    }
+    return progressUrl;
+}
+
+std::optional<std::string> extractJsonString(std::string const& body, std::string const& key) {
+    std::regex re("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+    std::smatch match;
+    if (!std::regex_search(body, match, re)) return std::nullopt;
+    return match[1].str();
+}
+
+std::optional<int> extractJsonInt(std::string const& body, std::string const& key) {
+    std::regex re("\"" + key + "\"\\s*:\\s*(-?\\d+)");
+    std::smatch match;
+    if (!std::regex_search(body, match, re)) return std::nullopt;
+    try {
+        return std::stoi(match[1].str());
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 } // namespace
 
@@ -321,6 +355,8 @@ void SyncManager::onMenuReady() {
     this->maybeWarnNoAccount();
     this->runPing();
     this->runFlush();
+    this->runCommandPoll();
+    this->ensureCommandPollLoop();
 }
 
 void SyncManager::onProfilePossiblyChanged() {
@@ -450,6 +486,50 @@ void SyncManager::runPing() {
     });
 }
 
+void SyncManager::runCommandPoll() {
+    if (!this->isEnabled()) {
+        return;
+    }
+
+    const std::string url = this->serverUrl();
+    const std::string key = this->apiKey();
+    if (url.empty() || key.empty()) {
+        return;
+    }
+
+    if (m_pollingCommands.exchange(true)) {
+        return;
+    }
+
+    async::spawn(this->pollCommandsAsync(), [this](Result<> result) {
+        m_pollingCommands.store(false);
+        if (GEODE_UNWRAP_IF_ERR(err, result)) {
+            if (this->isDebugEnabled()) {
+                log::warn("[ProgressSync] Command poll failed: {}", err);
+            }
+            return;
+        }
+    });
+}
+
+void SyncManager::ensureCommandPollLoop() {
+    if (m_commandLoopStarted.exchange(true)) {
+        return;
+    }
+
+    std::thread([this]() {
+        while (m_commandLoopStarted.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (!m_commandLoopStarted.load()) {
+                break;
+            }
+            Loader::get()->queueInMainThread([this]() {
+                this->runCommandPoll();
+            });
+        }
+    }).detach();
+}
+
 arc::Future<Result<>> SyncManager::pingAsync() {
     const auto profile = this->collectProfileSnapshot();
 
@@ -526,6 +606,96 @@ arc::Future<Result<>> SyncManager::pingAsync() {
             authCheck.code(),
             checkBody.empty() ? "" : ": ",
             checkBody
+        ));
+    }
+
+    co_return Ok();
+}
+
+arc::Future<Result<>> SyncManager::pollCommandsAsync() {
+    const std::string commandsUrl = commandsUrlFromProgressUrl(this->serverUrl());
+    const std::string key = this->apiKey();
+    if (commandsUrl.empty() || key.empty()) {
+        co_return Ok();
+    }
+
+    auto response = co_await web::WebRequest()
+                        .timeout(std::chrono::seconds(this->timeoutSeconds()))
+                        .header("Authorization", fmt::format("Bearer {}", key))
+                        .get(commandsUrl);
+
+    if (response.code() == 404) {
+        co_return Ok();
+    }
+    if (!response.ok()) {
+        std::string body;
+        if (auto bodyRes = response.string(); bodyRes.isOk()) {
+            body = bodyRes.unwrap();
+        }
+        co_return Err(fmt::format(
+            "HTTP {} while polling commands{}{}",
+            response.code(),
+            body.empty() ? "" : ": ",
+            body
+        ));
+    }
+
+    std::string body;
+    if (auto bodyRes = response.string(); bodyRes.isOk()) {
+        body = bodyRes.unwrap();
+    } else {
+        co_return Err("Command poll response was not readable.");
+    }
+
+    if (body.find(R"("command":null)") != std::string::npos || body.find(R"("command": null)") != std::string::npos) {
+        co_return Ok();
+    }
+
+    auto commandId = extractJsonString(body, "commandId").value_or("");
+    auto claimToken = extractJsonString(body, "claimToken").value_or("");
+    auto kind = extractJsonString(body, "kind").value_or("");
+    auto levelId = extractJsonInt(body, "levelId").value_or(0);
+
+    if (commandId.empty() || claimToken.empty()) {
+        co_return Ok();
+    }
+
+    bool success = false;
+    std::string result = "Unsupported command.";
+
+    if (kind == "open_level" && levelId > 0) {
+        LocalBridge::get().openLevelFromRemote(levelId);
+        success = true;
+        result = fmt::format("Opening level {}.", levelId);
+        if (this->isDebugEnabled()) {
+            log::debug("[ProgressSync] Received remote open command for level {}", levelId);
+        }
+    }
+
+    matjson::Value ackPayload = matjson::makeObject({
+        { "commandId", commandId },
+        { "claimToken", claimToken },
+        { "success", success },
+        { "result", result },
+    });
+
+    auto ack = co_await web::WebRequest()
+                   .timeout(std::chrono::seconds(this->timeoutSeconds()))
+                   .header("Authorization", fmt::format("Bearer {}", key))
+                   .header("Content-Type", "application/json")
+                   .bodyJSON(ackPayload)
+                   .post(commandsUrl);
+
+    if (!ack.ok()) {
+        std::string ackBody;
+        if (auto bodyRes = ack.string(); bodyRes.isOk()) {
+            ackBody = bodyRes.unwrap();
+        }
+        co_return Err(fmt::format(
+            "HTTP {} while acknowledging command{}{}",
+            ack.code(),
+            ackBody.empty() ? "" : ": ",
+            ackBody
         ));
     }
 

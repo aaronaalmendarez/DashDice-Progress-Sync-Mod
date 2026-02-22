@@ -11,11 +11,16 @@ project(GDProgressSync VERSION 0.1.0)
 
 add_library(${PROJECT_NAME} SHARED
     src/main.cpp
+    src/bridge/LocalBridge.cpp
     src/sync/SyncManager.cpp
     src/bridge/BridgeServer.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE src)
+
+if (WIN32)
+    target_link_libraries(${PROJECT_NAME} ws2_32)
+endif()
 
 if (NOT DEFINED ENV{GEODE_SDK})
     message(FATAL_ERROR "Unable to find Geode SDK! Please define GEODE_SDK environment variable to point to Geode")
@@ -26,7 +31,3 @@ endif()
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 
 setup_geode_mod(${PROJECT_NAME})
-
-if (WIN32)
-    target_link_libraries(${PROJECT_NAME} ws2_32)
-endif()

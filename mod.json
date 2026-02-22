@@ -37,33 +37,33 @@
       "type": "string",
       "default": ""
     },
-    "request-timeout": {
-      "name": "Request Timeout (s)",
-      "description": "HTTP timeout in seconds for sync requests.",
-      "type": "int",
-      "default": 12,
-      "min": 3
-    },
-    "enable-open-level-bridge": {
-      "name": "Enable Open-Level Bridge",
-      "description": "Allows DashDice website to open a level page in Geometry Dash.",
+    "enable-bridge": {
+      "name": "Enable Local Bridge",
+      "description": "Allows DashDice website to talk to this GD client on localhost for Open-In-GD and one-click pairing.",
       "type": "bool",
       "default": true
     },
     "bridge-port": {
-      "name": "Open-Level Bridge Port",
-      "description": "Localhost port used by website -> game open-level requests.",
+      "name": "Bridge Port",
+      "description": "Localhost port used by DashDice bridge.",
       "type": "int",
       "default": 47653,
       "min": 1024,
       "max": 65535
     },
     "bridge-allowed-origins": {
-      "name": "Open-Level Allowed Origins",
-      "description": "Comma-separated origins allowed to call the local bridge.",
+      "name": "Allowed Origins",
+      "description": "Comma-separated website origins allowed to call the local bridge.",
       "type": "string",
       "filter": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=% ",
-      "default": "https://dash.motioncore.xyz"
+      "default": "https://dash.motioncore.xyz, http://localhost:3000, http://localhost:3005"
+    },
+    "request-timeout": {
+      "name": "Request Timeout (s)",
+      "description": "HTTP timeout in seconds for sync requests.",
+      "type": "int",
+      "default": 12,
+      "min": 3
     },
     "debug-logs": {
       "name": "Debug Logs",

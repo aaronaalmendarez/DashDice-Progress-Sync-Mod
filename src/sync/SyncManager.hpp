@@ -65,13 +65,18 @@ private:
     void runFlush();
     ProfileSnapshot collectProfileSnapshot();
     void requestProfileSnapshotIfNeeded(int accountId, int userId);
+    void runCommandPoll();
+    void ensureCommandPollLoop();
     arc::Future<geode::Result<>> pingAsync();
     arc::Future<geode::Result<>> flushAsync();
+    arc::Future<geode::Result<>> pollCommandsAsync();
     arc::Future<geode::Result<matjson::Value>> postPayload(const matjson::Value& payload);
     void maybeWarnNoAccount();
 
     std::atomic<bool> m_pinging { false };
     std::atomic<bool> m_flushing { false };
+    std::atomic<bool> m_pollingCommands { false };
+    std::atomic<bool> m_commandLoopStarted { false };
     bool m_warnedNoAccount = false;
     std::int64_t m_lastProfileRequestMs = 0;
     std::int64_t m_lastProfilePingMs = 0;
