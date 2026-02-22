@@ -7,7 +7,7 @@ set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 set(CMAKE_UNITY_BUILD OFF)
 set(GEODE_DISABLE_PRECOMPILED_HEADERS ON)
 
-project(GDProgressSync VERSION 0.1.0)
+project(GDProgressSync VERSION 0.1.1)
 
 add_library(${PROJECT_NAME} SHARED
     src/main.cpp

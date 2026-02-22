@@ -2,24 +2,19 @@
 
 DashDice Progress Sync keeps your level progress synced to DashDice while you play Geometry Dash.
 
-## What It Syncs
-
-- Normal progress (%)
-- Practice progress (%)
-- Attempts
-
 ## Quick Start
 
 1. Generate your connection key on DashDice.
 2. Open Geode settings for **DashDice Progress Sync**.
 3. Paste your key and endpoint.
 4. Play any level and exit; your progress is sent automatically.
+5. For phone/browser control, use the pairing flow on DashDice while GD is running on your PC.
 
 ## Why Use It
 
 - No manual tracking
 - Sync runs in the background
-- If your server is offline, progress is queued and sent later
+- Open levels in GD directly from DashDice on your PC
 
 ## Tip
 

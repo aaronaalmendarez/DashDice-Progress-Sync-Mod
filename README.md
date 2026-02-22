@@ -1,41 +1,26 @@
 # DashDice Progress Sync Mod
 
-This Geode mod sends level progress updates to your DashDice server.
+DashDice Progress Sync keeps your Geometry Dash progress synced with DashDice.
 
-## What It Syncs
+## Install
 
-- `levelId`
-- `normal` (0-100)
-- `practice` (0-100)
-- `attempts`
+1. Install Geode for Geometry Dash.
+2. Download the latest `dashdice.progress_sync.geode` from releases.
+3. Put the file in your Geometry Dash `geode/mods` folder.
+4. Restart Geometry Dash.
 
-The mod captures data when you leave a level (`onQuit`) and on completion (`levelComplete`), then pushes queued events to your API endpoint.
+## Setup
 
-It also sends optional profile metadata when available:
-- `gdHasAccount`
-- `gdAccountId`
-- `gdUsername`
-- `gdPlayerName`
+1. Open DashDice and generate a connection key.
+2. In Geode, open settings for **DashDice Progress Sync**.
+3. Set:
+   - **Sync Endpoint**: `https://dash.motioncore.xyz/api/sync/progress`
+   - **API Key**: your key from DashDice
+4. Leave **Enable Progress Sync** and **Enable Local Bridge** enabled.
+5. Restart Geometry Dash once.
 
-If no Geometry Dash account is linked, the mod shows a one-time notice recommending account login for better sync reliability.
+## Use
 
-## Settings
-
-- `Enable Progress Sync`
-- `Sync Endpoint` (example: `http://localhost:3000/api/sync/progress`)
-- `API Key` (`Authorization: Bearer <key>`)
-- `Request Timeout (s)`
-- `Debug Logs`
-
-## Build
-
-1. Set `GEODE_SDK` environment variable.
-2. From this folder:
-   - `cmake -B build`
-   - `cmake --build build --config RelWithDebInfo`
-3. Install generated `.geode` into your GD `geode/mods` folder.
-
-## Notes
-
-- Pending progress events are stored in Geode saved values and retried when menu initializes.
-- If endpoint/API key is missing, queue remains local until configured.
+- Play a level and exit; progress syncs automatically.
+- Use **Open in GD** from DashDice on the same PC.
+- Use the pairing flow in DashDice to link phone/browser sessions.
