@@ -86,6 +86,22 @@ std::string deriveOpenEndpointFromSync(std::string const& syncEndpoint) {
     return fmt::format("{}/api/gd/open", origin);
 }
 
+std::string originFromUrlLike(std::string const& rawUrl) {
+    auto url = trim(rawUrl);
+    auto schemePos = url.find("://");
+    if (url.empty() || schemePos == std::string::npos) {
+        return "";
+    }
+    auto pathPos = url.find('/', schemePos + 3);
+    return pathPos == std::string::npos ? url : url.substr(0, pathPos);
+}
+
+std::string deriveSyncEndpointFromOrigin(std::string const& origin) {
+    auto value = trim(origin);
+    if (value.empty()) return "";
+    return fmt::format("{}/api/sync/progress", value);
+}
+
 std::string toLowerCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -775,6 +791,16 @@ arc::Future<Result<>> LocalBridge::claimPairAsync(std::string code, std::string 
     auto openEndpoint = extractJsonString(body, "openEndpoint").value_or("");
     auto apiKey = extractJsonString(body, "apiKey").value_or("");
     auto allowedOrigins = extractJsonString(body, "allowedOriginsCsv").value_or("");
+
+    // Pairing should always follow the site origin that initiated pairing
+    // (localhost vs production), even if backend fields are stale.
+    if (auto claimOrigin = originFromUrlLike(claimUrl); !claimOrigin.empty()) {
+        if (auto derivedSync = deriveSyncEndpointFromOrigin(claimOrigin); !derivedSync.empty()) {
+            syncEndpoint = derivedSync;
+        }
+        openEndpoint = fmt::format("{}/api/gd/open", claimOrigin);
+    }
+
     if (openEndpoint.empty()) {
         openEndpoint = deriveOpenEndpointFromSync(syncEndpoint);
     }
@@ -783,9 +809,12 @@ arc::Future<Result<>> LocalBridge::claimPairAsync(std::string code, std::string 
     }
 
     Mod::get()->setSettingValue<std::string>("server-url", syncEndpoint);
+    Mod::get()->setSavedValue<std::string>("persist-setting-server-url", syncEndpoint);
     Mod::get()->setSettingValue<std::string>("api-key", apiKey);
+    Mod::get()->setSavedValue<std::string>("persist-setting-api-key", apiKey);
     if (!allowedOrigins.empty()) {
         Mod::get()->setSettingValue<std::string>("bridge-allowed-origins", allowedOrigins);
+        Mod::get()->setSavedValue<std::string>("persist-setting-bridge-allowed-origins", allowedOrigins);
     }
 
     if (this->isDebugEnabled()) {
