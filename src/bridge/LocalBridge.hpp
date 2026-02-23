@@ -47,6 +47,7 @@ private:
     void queueOpenLevel(int levelId);
     void queueFocusWindow();
     void focusGameWindow();
+    void focusGameWindowBurst(int attempts, int delayMs);
     void openLevelInGame(int levelId);
     void completePendingOpen();
     void restoreLevelDelegate();

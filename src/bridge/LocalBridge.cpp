@@ -149,6 +149,7 @@ bool tryBringWindowToFront(HWND hwnd) {
     SetActiveWindow(hwnd);
     SetFocus(hwnd);
 
+    LockSetForegroundWindow(LSFW_UNLOCK);
     AllowSetForegroundWindow(ASFW_ANY);
     SetForegroundWindow(hwnd);
     if (GetForegroundWindow() == hwnd) {
@@ -177,6 +178,16 @@ bool tryBringWindowToFront(HWND hwnd) {
     altInputs[1].ki.wVk = VK_MENU;
     altInputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(2, altInputs, sizeof(INPUT));
+
+    INPUT mouseNudge {};
+    mouseNudge.type = INPUT_MOUSE;
+    mouseNudge.mi.dwFlags = MOUSEEVENTF_MOVE;
+    mouseNudge.mi.dx = 0;
+    mouseNudge.mi.dy = 0;
+    SendInput(1, &mouseNudge, sizeof(INPUT));
+
+    LockSetForegroundWindow(LSFW_UNLOCK);
+    AllowSetForegroundWindow(ASFW_ANY);
     BringWindowToTop(hwnd);
     SetForegroundWindow(hwnd);
     if (GetForegroundWindow() == hwnd) {
@@ -445,6 +456,10 @@ void LocalBridge::openLevelFromRemote(int levelId) {
     if (this->isDebugEnabled()) {
         log::debug("[DashDiceBridge] Remote open request received for level {}", levelId);
     }
+    // Remote (phone/browser) opens are asynchronous and often lack a local
+    // foreground user gesture, so retry focus longer before opening.
+    this->focusGameWindow();
+    this->focusGameWindowBurst(24, 200);
     this->queueOpenLevel(levelId);
 }
 
@@ -738,13 +753,7 @@ void LocalBridge::queueOpenLevel(int levelId) {
     // Focus immediately from the bridge thread so this still works
     // when GD's main thread is background-throttled.
     this->focusGameWindow();
-    std::thread([this]() {
-        // Retry focus briefly in case Windows foreground lock rejects first attempt.
-        for (int i = 0; i < 5; i += 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            this->focusGameWindow();
-        }
-    }).detach();
+    this->focusGameWindowBurst(8, 180);
 
     Loader::get()->queueInMainThread([this, levelId]() {
         this->openLevelInGame(levelId);
@@ -754,6 +763,7 @@ void LocalBridge::queueOpenLevel(int levelId) {
 void LocalBridge::queueFocusWindow() {
     // Try immediately, without waiting for main-thread queue processing.
     this->focusGameWindow();
+    this->focusGameWindowBurst(8, 180);
 
     // Also retry on main thread in case Windows denies foreground at first attempt.
     Loader::get()->queueInMainThread([this]() {
@@ -774,8 +784,25 @@ void LocalBridge::focusGameWindow() {
 #endif
 }
 
+void LocalBridge::focusGameWindowBurst(int attempts, int delayMs) {
+#ifdef GEODE_IS_WINDOWS
+    if (attempts <= 0) return;
+    if (delayMs < 1) delayMs = 1;
+    std::thread([this, attempts, delayMs]() {
+        for (int i = 0; i < attempts; i += 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            this->focusGameWindow();
+        }
+    }).detach();
+#else
+    (void)attempts;
+    (void)delayMs;
+#endif
+}
+
 void LocalBridge::openResolvedLevel(GJGameLevel* level) {
     if (level == nullptr) return;
+    this->focusGameWindow();
     auto* scene = LevelInfoLayer::scene(level, false);
     if (scene == nullptr) return;
     if (this->isDebugEnabled()) {
