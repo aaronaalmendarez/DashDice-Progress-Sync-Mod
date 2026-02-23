@@ -4,7 +4,7 @@ DashDice Progress Sync keeps your level progress synced to DashDice while you pl
 
 ## Quick Start
 
-1. Generate your connection key on DashDice.
+1. Open https://dash.motioncore.xyz/ and generate your connection key.
 2. Open Geode settings for **DashDice Progress Sync**.
 3. Paste your key and endpoint.
 4. Play any level and exit; your progress is sent automatically.
@@ -22,4 +22,5 @@ For best account matching and long-term reliability, log into a Geometry Dash ac
 
 ## Links
 
+- Official Dashboard: https://dash.motioncore.xyz/
 - Mod Repo: https://github.com/aaronaalmendarez/DashDice-Progress-Sync-Mod
