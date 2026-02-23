@@ -7,6 +7,7 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
@@ -53,6 +54,72 @@ constexpr int kDefaultBridgePort = 47653;
 constexpr int kReadBufferSize = 4096;
 constexpr int kMaxRequestSize = 128 * 1024;
 constexpr int kMaxBodySize = 64 * 1024;
+
+#ifdef GEODE_IS_WINDOWS
+struct WindowSearchContext {
+    DWORD processId = 0;
+    HWND found = nullptr;
+};
+
+BOOL CALLBACK findMainWindowForProcess(HWND hwnd, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<WindowSearchContext*>(lParam);
+    if (!ctx) return FALSE;
+
+    DWORD windowProcessId = 0;
+    GetWindowThreadProcessId(hwnd, &windowProcessId);
+    if (windowProcessId != ctx->processId) return TRUE;
+    if (GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+
+    ctx->found = hwnd;
+    return FALSE;
+}
+
+HWND findCurrentProcessMainWindow() {
+    WindowSearchContext ctx;
+    ctx.processId = GetCurrentProcessId();
+    EnumWindows(findMainWindowForProcess, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found;
+}
+
+bool focusCurrentProcessWindow() {
+    HWND hwnd = findCurrentProcessMainWindow();
+    if (!hwnd) return false;
+
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_SHOW);
+    }
+
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+
+    if (!SetForegroundWindow(hwnd)) {
+        HWND foreground = GetForegroundWindow();
+        DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+        DWORD currentThread = GetCurrentThreadId();
+        if (foregroundThread && foregroundThread != currentThread) {
+            AttachThreadInput(foregroundThread, currentThread, TRUE);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            AttachThreadInput(foregroundThread, currentThread, FALSE);
+        }
+    }
+
+    if (GetForegroundWindow() == hwnd) {
+        return true;
+    }
+
+    FLASHWINFO flash {};
+    flash.cbSize = sizeof(FLASHWINFO);
+    flash.hwnd = hwnd;
+    flash.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+    flash.uCount = 3;
+    FlashWindowEx(&flash);
+    return false;
+}
+#endif
 
 std::string trim(std::string const& in) {
     auto begin = in.begin();
@@ -502,6 +569,12 @@ void LocalBridge::handleClient(int clientFd) {
         return;
     }
 
+    if (req.method == "POST" && req.path == "/focus") {
+        this->queueFocusWindow();
+        sendJson(202, R"({"ok":true,"accepted":true,"message":"Geometry Dash focus requested."})", true);
+        return;
+    }
+
     if (req.method == "POST" && req.path == "/pair-request") {
         auto code = extractJsonString(req.body, "code").value_or("");
         auto claimUrl = extractJsonString(req.body, "claimUrl").value_or("");
@@ -558,8 +631,28 @@ bool LocalBridge::isOriginAllowed(std::string const& origin) const {
 
 void LocalBridge::queueOpenLevel(int levelId) {
     Loader::get()->queueInMainThread([this, levelId]() {
+        this->focusGameWindow();
         this->openLevelInGame(levelId);
     });
+}
+
+void LocalBridge::queueFocusWindow() {
+    Loader::get()->queueInMainThread([this]() {
+        this->focusGameWindow();
+    });
+}
+
+void LocalBridge::focusGameWindow() {
+#ifdef GEODE_IS_WINDOWS
+    const bool focused = focusCurrentProcessWindow();
+    if (this->isDebugEnabled()) {
+        if (focused) {
+            log::debug("[DashDiceBridge] Focused Geometry Dash window");
+        } else {
+            log::debug("[DashDiceBridge] Requested Geometry Dash window focus (foreground lock may apply)");
+        }
+    }
+#endif
 }
 
 void LocalBridge::openResolvedLevel(GJGameLevel* level) {
@@ -675,6 +768,7 @@ void LocalBridge::setupPageInfo(gd::string, char const*) {}
 
 void LocalBridge::queuePairPrompt(std::string code, std::string claimUrl, std::string origin) {
     Loader::get()->queueInMainThread([this, code = std::move(code), claimUrl = std::move(claimUrl), origin = std::move(origin)]() {
+        this->focusGameWindow();
         auto message = fmt::format(
             "Allow DashDice to sync this Geometry Dash client?\n\nCode: {}\nOrigin: {}\n\nThis will auto-apply your endpoint, open endpoint, allowed origins, and API key.",
             code,

@@ -45,6 +45,8 @@ private:
     void handleClient(int clientFd);
 
     void queueOpenLevel(int levelId);
+    void queueFocusWindow();
+    void focusGameWindow();
     void openLevelInGame(int levelId);
     void completePendingOpen();
     void restoreLevelDelegate();
