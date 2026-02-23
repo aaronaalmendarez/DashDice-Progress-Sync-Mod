@@ -662,6 +662,9 @@ void LocalBridge::handleClient(int clientFd) {
     }
 
     if (req.method == "POST" && req.path == "/focus") {
+        if (this->isDebugEnabled()) {
+            log::debug("[DashDiceBridge] Received /focus request from origin '{}'", origin.empty() ? "unknown" : origin);
+        }
         this->queueFocusWindow();
         sendJson(202, R"({"ok":true,"accepted":true,"message":"Geometry Dash focus requested."})", true);
         return;
@@ -681,6 +684,13 @@ void LocalBridge::handleClient(int clientFd) {
             return;
         }
 
+        if (this->isDebugEnabled()) {
+            log::debug(
+                "[DashDiceBridge] Received /pair-request for code {} from origin '{}'",
+                code,
+                requestOrigin.empty() ? "unknown" : requestOrigin
+            );
+        }
         this->queuePairPrompt(code, claimUrl, requestOrigin);
         sendJson(202, R"({"ok":true,"accepted":true,"message":"Check Geometry Dash for confirmation."})", true);
         return;
@@ -722,13 +732,20 @@ bool LocalBridge::isOriginAllowed(std::string const& origin) const {
 }
 
 void LocalBridge::queueOpenLevel(int levelId) {
+    // Focus immediately from the bridge thread so this still works
+    // when GD's main thread is background-throttled.
+    this->focusGameWindow();
+
     Loader::get()->queueInMainThread([this, levelId]() {
-        this->focusGameWindow();
         this->openLevelInGame(levelId);
     });
 }
 
 void LocalBridge::queueFocusWindow() {
+    // Try immediately, without waiting for main-thread queue processing.
+    this->focusGameWindow();
+
+    // Also retry on main thread in case Windows denies foreground at first attempt.
     Loader::get()->queueInMainThread([this]() {
         this->focusGameWindow();
     });
@@ -859,6 +876,9 @@ void LocalBridge::loadLevelsFailed(char const*, int) {
 void LocalBridge::setupPageInfo(gd::string, char const*) {}
 
 void LocalBridge::queuePairPrompt(std::string code, std::string claimUrl, std::string origin) {
+    // Focus now so user sees the popup even if GD is background-throttled.
+    this->focusGameWindow();
+
     Loader::get()->queueInMainThread([this, code = std::move(code), claimUrl = std::move(claimUrl), origin = std::move(origin)]() {
         this->focusGameWindow();
         auto message = fmt::format(
