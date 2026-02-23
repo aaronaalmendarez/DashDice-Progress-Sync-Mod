@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <random>
 #include <regex>
@@ -56,9 +57,39 @@ constexpr int kMaxRequestSize = 128 * 1024;
 constexpr int kMaxBodySize = 64 * 1024;
 
 #ifdef GEODE_IS_WINDOWS
+std::string toLowerAscii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return text;
+}
+
+std::string getWindowClassName(HWND hwnd) {
+    std::array<char, 256> buffer {};
+    int len = GetClassNameA(hwnd, buffer.data(), static_cast<int>(buffer.size()));
+    if (len <= 0) return "";
+    return std::string(buffer.data(), static_cast<size_t>(len));
+}
+
+std::string getWindowTitle(HWND hwnd) {
+    std::array<char, 512> buffer {};
+    int len = GetWindowTextA(hwnd, buffer.data(), static_cast<int>(buffer.size()));
+    if (len <= 0) return "";
+    return std::string(buffer.data(), static_cast<size_t>(len));
+}
+
+bool containsCaseInsensitive(std::string const& haystack, std::string const& needle) {
+    if (needle.empty()) return true;
+    auto lowerHaystack = toLowerAscii(haystack);
+    auto lowerNeedle = toLowerAscii(needle);
+    return lowerHaystack.find(lowerNeedle) != std::string::npos;
+}
+
 struct WindowSearchContext {
     DWORD processId = 0;
-    HWND found = nullptr;
+    HWND best = nullptr;
+    HWND fallback = nullptr;
+    int bestScore = std::numeric_limits<int>::min();
 };
 
 BOOL CALLBACK findMainWindowForProcess(HWND hwnd, LPARAM lParam) {
@@ -68,46 +99,107 @@ BOOL CALLBACK findMainWindowForProcess(HWND hwnd, LPARAM lParam) {
     DWORD windowProcessId = 0;
     GetWindowThreadProcessId(hwnd, &windowProcessId);
     if (windowProcessId != ctx->processId) return TRUE;
-    if (GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
-    if (!IsWindowVisible(hwnd)) return TRUE;
 
-    ctx->found = hwnd;
-    return FALSE;
+    if (!IsWindow(hwnd)) return TRUE;
+
+    if (!ctx->fallback) {
+        ctx->fallback = hwnd;
+    }
+
+    int score = 0;
+    if (IsWindowVisible(hwnd)) score += 3;
+    if (GetWindow(hwnd, GW_OWNER) == nullptr) score += 2;
+
+    const auto exStyle = static_cast<unsigned long>(GetWindowLongPtrA(hwnd, GWL_EXSTYLE));
+    if ((exStyle & WS_EX_TOOLWINDOW) != 0u) {
+        score -= 3;
+    }
+
+    const auto className = getWindowClassName(hwnd);
+    const auto title = getWindowTitle(hwnd);
+
+    if (containsCaseInsensitive(className, "glfw")) score += 4;
+    if (containsCaseInsensitive(title, "geometry dash")) score += 5;
+
+    if (score > ctx->bestScore) {
+        ctx->bestScore = score;
+        ctx->best = hwnd;
+    }
+
+    return TRUE;
 }
 
 HWND findCurrentProcessMainWindow() {
     WindowSearchContext ctx;
     ctx.processId = GetCurrentProcessId();
     EnumWindows(findMainWindowForProcess, reinterpret_cast<LPARAM>(&ctx));
-    return ctx.found;
+    return ctx.best ? ctx.best : ctx.fallback;
+}
+
+bool tryBringWindowToFront(HWND hwnd) {
+    if (!hwnd) return false;
+
+    // Ensure the window is restored and raised.
+    ShowWindowAsync(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOWNORMAL);
+    ShowWindowAsync(hwnd, SW_SHOW);
+    PostMessage(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+
+    AllowSetForegroundWindow(ASFW_ANY);
+    SetForegroundWindow(hwnd);
+    if (GetForegroundWindow() == hwnd) {
+        return true;
+    }
+
+    HWND foreground = GetForegroundWindow();
+    DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+    DWORD currentThread = GetCurrentThreadId();
+    if (foregroundThread && foregroundThread != currentThread) {
+        AttachThreadInput(foregroundThread, currentThread, TRUE);
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        AttachThreadInput(foregroundThread, currentThread, FALSE);
+    }
+    if (GetForegroundWindow() == hwnd) {
+        return true;
+    }
+
+    // Windows foreground lock fallback: inject a minimal ALT key press.
+    INPUT altInputs[2] {};
+    altInputs[0].type = INPUT_KEYBOARD;
+    altInputs[0].ki.wVk = VK_MENU;
+    altInputs[1].type = INPUT_KEYBOARD;
+    altInputs[1].ki.wVk = VK_MENU;
+    altInputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, altInputs, sizeof(INPUT));
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    if (GetForegroundWindow() == hwnd) {
+        return true;
+    }
+
+    using SwitchToThisWindowFn = void(WINAPI*)(HWND, BOOL);
+    auto* user32 = GetModuleHandleA("user32.dll");
+    if (user32) {
+        auto switchToWindow = reinterpret_cast<SwitchToThisWindowFn>(GetProcAddress(user32, "SwitchToThisWindow"));
+        if (switchToWindow) {
+            switchToWindow(hwnd, TRUE);
+        }
+    }
+
+    return GetForegroundWindow() == hwnd;
 }
 
 bool focusCurrentProcessWindow() {
     HWND hwnd = findCurrentProcessMainWindow();
     if (!hwnd) return false;
 
-    if (IsIconic(hwnd)) {
-        ShowWindow(hwnd, SW_RESTORE);
-    } else {
-        ShowWindow(hwnd, SW_SHOW);
-    }
-
-    BringWindowToTop(hwnd);
-    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-
-    if (!SetForegroundWindow(hwnd)) {
-        HWND foreground = GetForegroundWindow();
-        DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
-        DWORD currentThread = GetCurrentThreadId();
-        if (foregroundThread && foregroundThread != currentThread) {
-            AttachThreadInput(foregroundThread, currentThread, TRUE);
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-            AttachThreadInput(foregroundThread, currentThread, FALSE);
-        }
-    }
-
-    if (GetForegroundWindow() == hwnd) {
+    if (tryBringWindowToFront(hwnd)) {
         return true;
     }
 
