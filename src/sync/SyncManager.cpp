@@ -577,11 +577,11 @@ void SyncManager::ensureCommandPollLoop() {
 
             const auto nowMs = nowUnixMs();
             const auto lastPollMs = m_lastCommandPollMs.load();
-            // If a command poll gets stuck (commonly when GD is background-throttled),
-            // do not block command wake handling for the full HTTP timeout.
-            const auto stalePollMs = static_cast<std::int64_t>(
-                std::min(5'000, std::max(2'500, std::max(3, this->timeoutSeconds()) * 1000 / 2))
-            );
+            const bool wsOpen = m_commandSocketOpen.load();
+            // Aggressive unlock policy:
+            // - with socket push active, recover from stuck polls quickly
+            // - without socket push, keep a safer fallback window
+            const auto stalePollMs = wsOpen ? static_cast<std::int64_t>(1'800) : static_cast<std::int64_t>(4'000);
             if (m_pollingCommands.load() && lastPollMs > 0 && nowMs - lastPollMs > stalePollMs) {
                 m_pollingCommands.store(false);
                 if (this->isDebugEnabled()) {
@@ -592,7 +592,6 @@ void SyncManager::ensureCommandPollLoop() {
                 }
             }
 
-            const bool wsOpen = m_commandSocketOpen.load();
             const std::int64_t pollIntervalMs = wsOpen ? 10'000 : 2'000;
             if (nowMs - m_lastCommandPollMs.load() >= pollIntervalMs) {
                 // Keep polling as fallback, but back off heavily when socket push is active.
@@ -723,14 +722,14 @@ void SyncManager::ensureCommandSocket() {
                         if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
                             auto messageType = extractJsonString(textBuffer, "type").value_or("");
                             if (messageType == "wake" || messageType == "command") {
-                                const auto nowMs = nowUnixMs();
-                                const auto lastPollMs = m_lastCommandPollMs.load();
-                                if (m_pollingCommands.load() && lastPollMs > 0 && nowMs - lastPollMs > 1'200) {
+                                if (m_pollingCommands.load()) {
+                                    const auto nowMs = nowUnixMs();
+                                    const auto lastPollMs = m_lastCommandPollMs.load();
                                     m_pollingCommands.store(false);
                                     if (this->isDebugEnabled()) {
                                         log::debug(
                                             "[ProgressSync] Wake forced stale poll unlock after {}ms",
-                                            nowMs - lastPollMs
+                                            lastPollMs > 0 ? (nowMs - lastPollMs) : 0
                                         );
                                     }
                                 }
