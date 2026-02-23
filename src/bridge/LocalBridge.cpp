@@ -442,6 +442,9 @@ void LocalBridge::onMenuReady() {
 
 void LocalBridge::openLevelFromRemote(int levelId) {
     if (levelId <= 0) return;
+    if (this->isDebugEnabled()) {
+        log::debug("[DashDiceBridge] Remote open request received for level {}", levelId);
+    }
     this->queueOpenLevel(levelId);
 }
 
@@ -735,6 +738,13 @@ void LocalBridge::queueOpenLevel(int levelId) {
     // Focus immediately from the bridge thread so this still works
     // when GD's main thread is background-throttled.
     this->focusGameWindow();
+    std::thread([this]() {
+        // Retry focus briefly in case Windows foreground lock rejects first attempt.
+        for (int i = 0; i < 5; i += 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            this->focusGameWindow();
+        }
+    }).detach();
 
     Loader::get()->queueInMainThread([this, levelId]() {
         this->openLevelInGame(levelId);

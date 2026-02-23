@@ -519,13 +519,13 @@ void SyncManager::ensureCommandPollLoop() {
 
     std::thread([this]() {
         while (m_commandLoopStarted.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             if (!m_commandLoopStarted.load()) {
                 break;
             }
-            Loader::get()->queueInMainThread([this]() {
-                this->runCommandPoll();
-            });
+            // Poll commands directly from the loop thread so remote opens still
+            // get claimed while GD is backgrounded / main thread is throttled.
+            this->runCommandPoll();
         }
     }).detach();
 }
