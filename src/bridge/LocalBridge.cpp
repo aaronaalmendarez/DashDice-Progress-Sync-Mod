@@ -456,10 +456,7 @@ void LocalBridge::openLevelFromRemote(int levelId) {
     if (this->isDebugEnabled()) {
         log::debug("[DashDiceBridge] Remote open request received for level {}", levelId);
     }
-    // Remote (phone/browser) opens are asynchronous and often lack a local
-    // foreground user gesture, so retry focus longer before opening.
-    this->focusGameWindow();
-    this->focusGameWindowBurst(24, 200);
+    // Let queueOpenLevel own focus retries so we avoid stacking multiple bursts.
     this->queueOpenLevel(levelId);
 }
 
@@ -771,7 +768,7 @@ void LocalBridge::queueFocusWindow() {
     });
 }
 
-void LocalBridge::focusGameWindow() {
+bool LocalBridge::focusGameWindow() {
 #ifdef GEODE_IS_WINDOWS
     const bool focused = focusCurrentProcessWindow();
     if (this->isDebugEnabled()) {
@@ -781,7 +778,9 @@ void LocalBridge::focusGameWindow() {
             log::debug("[DashDiceBridge] Requested Geometry Dash window focus (foreground lock may apply)");
         }
     }
+    return focused;
 #endif
+    return false;
 }
 
 void LocalBridge::focusGameWindowBurst(int attempts, int delayMs) {
@@ -791,7 +790,10 @@ void LocalBridge::focusGameWindowBurst(int attempts, int delayMs) {
     std::thread([this, attempts, delayMs]() {
         for (int i = 0; i < attempts; i += 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-            this->focusGameWindow();
+            // Stop retrying once focus succeeds to avoid stealing focus repeatedly.
+            if (this->focusGameWindow()) {
+                break;
+            }
         }
     }).detach();
 #else
@@ -896,6 +898,9 @@ void LocalBridge::loadLevelsFinished(cocos2d::CCArray* levels, char const*, int)
         if (this->isDebugEnabled()) {
             log::debug("[DashDiceBridge] Replaced placeholder with downloaded level {} page", levelId);
         }
+        // Already opened the resolved level; avoid reopening/focusing again via completePendingOpen.
+        this->restoreLevelDelegate();
+        return;
     } else if (this->isDebugEnabled()) {
         log::warn("[DashDiceBridge] Could not resolve level {} from download response", levelId);
     }

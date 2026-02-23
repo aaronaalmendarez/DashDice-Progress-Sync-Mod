@@ -84,8 +84,8 @@ private:
     bool m_warnedNoAccount = false;
     std::int64_t m_lastProfileRequestMs = 0;
     std::int64_t m_lastProfilePingMs = 0;
-    std::int64_t m_lastCommandPollMs = 0;
-    std::int64_t m_lastCommandSocketConnectAttemptMs = 0;
+    std::atomic<std::int64_t> m_lastCommandPollMs { 0 };
+    std::atomic<std::int64_t> m_lastCommandSocketConnectAttemptMs { 0 };
     std::string m_lastProfileSignature;
     std::string m_lastCommandSocketUrl;
     std::unordered_map<int, std::tuple<int, int, int>> m_lastSeenByLevel;

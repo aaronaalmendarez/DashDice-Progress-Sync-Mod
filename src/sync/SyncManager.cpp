@@ -548,7 +548,7 @@ void SyncManager::runCommandPoll() {
         return;
     }
 
-    m_lastCommandPollMs = nowUnixMs();
+    m_lastCommandPollMs.store(nowUnixMs());
 
     async::spawn(this->pollCommandsAsync(), [this](Result<> result) {
         m_pollingCommands.store(false);
@@ -576,9 +576,25 @@ void SyncManager::ensureCommandPollLoop() {
             this->ensureCommandSocket();
 
             const auto nowMs = nowUnixMs();
+            const auto lastPollMs = m_lastCommandPollMs.load();
+            // If a command poll gets stuck (commonly when GD is background-throttled),
+            // do not block command wake handling for the full HTTP timeout.
+            const auto stalePollMs = static_cast<std::int64_t>(
+                std::min(5'000, std::max(2'500, std::max(3, this->timeoutSeconds()) * 1000 / 2))
+            );
+            if (m_pollingCommands.load() && lastPollMs > 0 && nowMs - lastPollMs > stalePollMs) {
+                m_pollingCommands.store(false);
+                if (this->isDebugEnabled()) {
+                    log::warn(
+                        "[ProgressSync] Reset stale command poll lock after {}ms (GD may have been background-throttled)",
+                        nowMs - lastPollMs
+                    );
+                }
+            }
+
             const bool wsOpen = m_commandSocketOpen.load();
             const std::int64_t pollIntervalMs = wsOpen ? 10'000 : 2'000;
-            if (nowMs - m_lastCommandPollMs >= pollIntervalMs) {
+            if (nowMs - m_lastCommandPollMs.load() >= pollIntervalMs) {
                 // Keep polling as fallback, but back off heavily when socket push is active.
                 this->runCommandPoll();
             }
@@ -707,6 +723,17 @@ void SyncManager::ensureCommandSocket() {
                         if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
                             auto messageType = extractJsonString(textBuffer, "type").value_or("");
                             if (messageType == "wake" || messageType == "command") {
+                                const auto nowMs = nowUnixMs();
+                                const auto lastPollMs = m_lastCommandPollMs.load();
+                                if (m_pollingCommands.load() && lastPollMs > 0 && nowMs - lastPollMs > 1'200) {
+                                    m_pollingCommands.store(false);
+                                    if (this->isDebugEnabled()) {
+                                        log::debug(
+                                            "[ProgressSync] Wake forced stale poll unlock after {}ms",
+                                            nowMs - lastPollMs
+                                        );
+                                    }
+                                }
                                 if (this->isDebugEnabled()) {
                                     log::debug("[ProgressSync] Command socket wake received (type={})", messageType);
                                 }
@@ -733,10 +760,10 @@ void SyncManager::ensureCommandSocket() {
     }
 
     const auto nowMs = nowUnixMs();
-    if (nowMs - m_lastCommandSocketConnectAttemptMs < 5'000) {
+    if (nowMs - m_lastCommandSocketConnectAttemptMs.load() < 5'000) {
         return;
     }
-    m_lastCommandSocketConnectAttemptMs = nowMs;
+    m_lastCommandSocketConnectAttemptMs.store(nowMs);
 
     async::spawn(this->fetchCommandSocketUrlAsync(), [this](Result<std::string> result) {
         if (GEODE_UNWRAP_IF_ERR(err, result)) {
