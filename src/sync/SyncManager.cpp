@@ -23,6 +23,12 @@
 
 #include "../bridge/LocalBridge.hpp"
 
+#ifdef GEODE_IS_WINDOWS
+#include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
+#endif
+
 using namespace geode::prelude;
 
 namespace {
@@ -151,6 +157,16 @@ std::string commandsUrlFromProgressUrl(const std::string& progressUrl) {
     return progressUrl;
 }
 
+std::string commandsSocketInfoUrlFromProgressUrl(const std::string& progressUrl) {
+    constexpr const char* suffix = "/progress";
+    const auto suffixLen = std::char_traits<char>::length(suffix);
+    if (progressUrl.size() >= suffixLen &&
+        progressUrl.compare(progressUrl.size() - suffixLen, suffixLen, suffix) == 0) {
+        return progressUrl.substr(0, progressUrl.size() - suffixLen) + "/commands/socket-info";
+    }
+    return progressUrl;
+}
+
 std::optional<std::string> extractJsonString(std::string const& body, std::string const& key) {
     std::regex re("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
     std::smatch match;
@@ -168,6 +184,36 @@ std::optional<int> extractJsonInt(std::string const& body, std::string const& ke
         return std::nullopt;
     }
 }
+
+#ifdef GEODE_IS_WINDOWS
+std::wstring utf8ToWide(const std::string& in) {
+    if (in.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, in.c_str(), -1, nullptr, 0);
+    if (length <= 1) return {};
+    std::wstring out(static_cast<size_t>(length - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, in.c_str(), -1, out.data(), length);
+    return out;
+}
+
+struct WsEndpoint {
+    bool secure = false;
+    std::string host;
+    int port = 0;
+    std::string path;
+};
+
+std::optional<WsEndpoint> parseWsUrl(const std::string& url) {
+    std::regex re(R"(^(wss?)://([^/:]+)(?::(\d+))?(/.*)$)");
+    std::smatch m;
+    if (!std::regex_match(url, m, re)) return std::nullopt;
+    WsEndpoint out;
+    out.secure = m[1].str() == "wss";
+    out.host = m[2].str();
+    out.port = m[3].matched ? std::stoi(m[3].str()) : (out.secure ? 443 : 80);
+    out.path = m[4].str();
+    return out;
+}
+#endif
 } // namespace
 
 namespace dashdice {
@@ -355,6 +401,7 @@ void SyncManager::onMenuReady() {
     this->maybeWarnNoAccount();
     this->runPing();
     this->runFlush();
+    this->ensureCommandSocket();
     this->runCommandPoll();
     this->ensureCommandPollLoop();
 }
@@ -501,6 +548,8 @@ void SyncManager::runCommandPoll() {
         return;
     }
 
+    m_lastCommandPollMs = nowUnixMs();
+
     async::spawn(this->pollCommandsAsync(), [this](Result<> result) {
         m_pollingCommands.store(false);
         if (GEODE_UNWRAP_IF_ERR(err, result)) {
@@ -519,15 +568,235 @@ void SyncManager::ensureCommandPollLoop() {
 
     std::thread([this]() {
         while (m_commandLoopStarted.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             if (!m_commandLoopStarted.load()) {
                 break;
             }
-            // Poll commands directly from the loop thread so remote opens still
-            // get claimed while GD is backgrounded / main thread is throttled.
-            this->runCommandPoll();
+
+            this->ensureCommandSocket();
+
+            const auto nowMs = nowUnixMs();
+            const bool wsOpen = m_commandSocketOpen.load();
+            const std::int64_t pollIntervalMs = wsOpen ? 10'000 : 2'000;
+            if (nowMs - m_lastCommandPollMs >= pollIntervalMs) {
+                // Keep polling as fallback, but back off heavily when socket push is active.
+                this->runCommandPoll();
+            }
         }
     }).detach();
+}
+
+void SyncManager::ensureCommandSocket() {
+    if (!this->isEnabled()) return;
+
+    const std::string key = this->apiKey();
+    const std::string server = this->serverUrl();
+    if (key.empty() || server.empty()) {
+        m_commandSocketOpen.store(false);
+        m_lastCommandSocketUrl.clear();
+        return;
+    }
+
+    if (!m_commandSocketLoopStarted.exchange(true)) {
+        std::thread([this]() {
+#ifdef GEODE_IS_WINDOWS
+            while (m_commandSocketLoopStarted.load()) {
+                const std::string wsUrl = m_lastCommandSocketUrl;
+                if (wsUrl.empty()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+
+                auto endpoint = parseWsUrl(wsUrl);
+                if (!endpoint.has_value()) {
+                    if (this->isDebugEnabled()) {
+                        log::warn("[ProgressSync] Invalid command socket URL: {}", wsUrl);
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                auto hostW = utf8ToWide(endpoint->host);
+                auto pathW = utf8ToWide(endpoint->path);
+                if (hostW.empty() || pathW.empty()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                HINTERNET hSession = WinHttpOpen(L"DashDiceProgressSync/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+                if (!hSession) {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                const int timeoutMs = std::max(3, this->timeoutSeconds()) * 1000;
+                WinHttpSetTimeouts(hSession, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+                HINTERNET hConnect = WinHttpConnect(hSession, hostW.c_str(), static_cast<INTERNET_PORT>(endpoint->port), 0);
+                if (!hConnect) {
+                    WinHttpCloseHandle(hSession);
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                DWORD flags = endpoint->secure ? WINHTTP_FLAG_SECURE : 0;
+                HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", pathW.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+                if (!hRequest) {
+                    WinHttpCloseHandle(hConnect);
+                    WinHttpCloseHandle(hSession);
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
+                    WinHttpCloseHandle(hRequest);
+                    WinHttpCloseHandle(hConnect);
+                    WinHttpCloseHandle(hSession);
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                BOOL sent = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+                BOOL received = sent ? WinHttpReceiveResponse(hRequest, nullptr) : FALSE;
+                if (!sent || !received) {
+                    WinHttpCloseHandle(hRequest);
+                    WinHttpCloseHandle(hConnect);
+                    WinHttpCloseHandle(hSession);
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
+                WinHttpCloseHandle(hRequest);
+                if (!hWebSocket) {
+                    WinHttpCloseHandle(hConnect);
+                    WinHttpCloseHandle(hSession);
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                m_commandSocketOpen.store(true);
+                if (this->isDebugEnabled()) {
+                    log::debug("[ProgressSync] Command socket connected: {}", wsUrl);
+                }
+                this->runCommandPoll();
+
+                std::string textBuffer;
+                bool keepRunning = true;
+                while (keepRunning && m_commandSocketLoopStarted.load()) {
+                    BYTE recvBuf[4096];
+                    DWORD read = 0;
+                    WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE;
+                    const DWORD recvStatus = WinHttpWebSocketReceive(hWebSocket, recvBuf, sizeof(recvBuf), &read, &type);
+
+                    if (recvStatus == ERROR_WINHTTP_TIMEOUT) {
+                        continue;
+                    }
+                    if (recvStatus != ERROR_SUCCESS) {
+                        break;
+                    }
+
+                    if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+                        keepRunning = false;
+                        break;
+                    }
+
+                    if (type == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE ||
+                        type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+                        textBuffer.append(reinterpret_cast<char const*>(recvBuf), reinterpret_cast<char const*>(recvBuf) + read);
+                        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+                            auto messageType = extractJsonString(textBuffer, "type").value_or("");
+                            if (messageType == "wake" || messageType == "command") {
+                                if (this->isDebugEnabled()) {
+                                    log::debug("[ProgressSync] Command socket wake received (type={})", messageType);
+                                }
+                                this->runCommandPoll();
+                            }
+                            textBuffer.clear();
+                        }
+                    }
+                }
+
+                m_commandSocketOpen.store(false);
+                WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+                WinHttpCloseHandle(hWebSocket);
+                WinHttpCloseHandle(hConnect);
+                WinHttpCloseHandle(hSession);
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            }
+#else
+            while (m_commandSocketLoopStarted.load()) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+#endif
+        }).detach();
+    }
+
+    const auto nowMs = nowUnixMs();
+    if (nowMs - m_lastCommandSocketConnectAttemptMs < 5'000) {
+        return;
+    }
+    m_lastCommandSocketConnectAttemptMs = nowMs;
+
+    async::spawn(this->fetchCommandSocketUrlAsync(), [this](Result<std::string> result) {
+        if (GEODE_UNWRAP_IF_ERR(err, result)) {
+            if (this->isDebugEnabled()) {
+                log::debug("[ProgressSync] Command socket info unavailable: {}", err);
+            }
+            return;
+        }
+        const std::string url = result.unwrap();
+        if (!url.empty() && m_lastCommandSocketUrl != url) {
+            m_lastCommandSocketUrl = url;
+            if (this->isDebugEnabled()) {
+                log::debug("[ProgressSync] Command socket URL updated");
+            }
+        }
+    });
+}
+
+arc::Future<Result<std::string>> SyncManager::fetchCommandSocketUrlAsync() {
+    const std::string key = this->apiKey();
+    if (key.empty()) {
+        co_return Err("Missing API key for command socket.");
+    }
+
+    const std::string infoUrl = commandsSocketInfoUrlFromProgressUrl(this->serverUrl());
+    if (infoUrl.empty()) {
+        co_return Err("Missing sync endpoint for command socket.");
+    }
+
+    auto response = co_await web::WebRequest()
+                        .timeout(std::chrono::seconds(this->timeoutSeconds()))
+                        .header("Authorization", fmt::format("Bearer {}", key))
+                        .get(infoUrl);
+
+    if (!response.ok()) {
+        std::string body;
+        if (auto bodyRes = response.string(); bodyRes.isOk()) {
+            body = bodyRes.unwrap();
+        }
+        co_return Err(fmt::format(
+            "HTTP {} while fetching command socket info{}{}",
+            response.code(),
+            body.empty() ? "" : ": ",
+            body
+        ));
+    }
+
+    std::string body;
+    if (auto bodyRes = response.string(); bodyRes.isOk()) {
+        body = bodyRes.unwrap();
+    } else {
+        co_return Err("Socket info response was not readable.");
+    }
+
+    const std::string wsUrl = extractJsonString(body, "wsUrl").value_or("");
+    if (wsUrl.empty()) {
+        co_return Err("Socket info did not include wsUrl.");
+    }
+
+    co_return Ok(wsUrl);
 }
 
 arc::Future<Result<>> SyncManager::pingAsync() {

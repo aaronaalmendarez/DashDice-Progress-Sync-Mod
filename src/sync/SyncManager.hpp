@@ -67,9 +67,11 @@ private:
     void requestProfileSnapshotIfNeeded(int accountId, int userId);
     void runCommandPoll();
     void ensureCommandPollLoop();
+    void ensureCommandSocket();
     arc::Future<geode::Result<>> pingAsync();
     arc::Future<geode::Result<>> flushAsync();
     arc::Future<geode::Result<>> pollCommandsAsync();
+    arc::Future<geode::Result<std::string>> fetchCommandSocketUrlAsync();
     arc::Future<geode::Result<matjson::Value>> postPayload(const matjson::Value& payload);
     void maybeWarnNoAccount();
 
@@ -77,10 +79,15 @@ private:
     std::atomic<bool> m_flushing { false };
     std::atomic<bool> m_pollingCommands { false };
     std::atomic<bool> m_commandLoopStarted { false };
+    std::atomic<bool> m_commandSocketLoopStarted { false };
+    std::atomic<bool> m_commandSocketOpen { false };
     bool m_warnedNoAccount = false;
     std::int64_t m_lastProfileRequestMs = 0;
     std::int64_t m_lastProfilePingMs = 0;
+    std::int64_t m_lastCommandPollMs = 0;
+    std::int64_t m_lastCommandSocketConnectAttemptMs = 0;
     std::string m_lastProfileSignature;
+    std::string m_lastCommandSocketUrl;
     std::unordered_map<int, std::tuple<int, int, int>> m_lastSeenByLevel;
 };
 } // namespace dashdice
